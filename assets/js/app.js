@@ -19,17 +19,50 @@
 
 // Include phoenix_html to handle method=PUT/DELETE in forms and buttons.
 import "phoenix_html"
-// Establish Phoenix Socket and LiveView configuration.
 import {Socket} from "phoenix"
 import {LiveSocket} from "phoenix_live_view"
 import {hooks as colocatedHooks} from "phoenix-colocated/eva_web"
 import topbar from "../vendor/topbar"
 
+const Hooks = {
+  ...colocatedHooks,
+
+  ScrollToBottom: {
+    mounted() {
+      this.scroll()
+    },
+    updated() {
+      this.scroll()
+    },
+    scroll() {
+      this.el.scrollTop = this.el.scrollHeight
+    },
+  },
+
+  ChatInput: {
+    mounted() {
+      this.el.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault()
+          const text = this.el.value.trim()
+          if (text) {
+            this.pushEvent("send", {text})
+          }
+        }
+      })
+      this.el.addEventListener("input", () => {
+        this.el.style.height = "auto"
+        this.el.style.height = Math.min(this.el.scrollHeight, 144) + "px"
+      })
+    },
+  },
+}
+
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks},
+  hooks: Hooks,
 })
 
 // Show progress bar on live navigation and form submits
