@@ -23,6 +23,14 @@ end
 config :eva_web, EvaWebWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
+eva_overrides =
+  [model: System.get_env("EVA_MODEL"), base_url: System.get_env("EVA_BASE_URL")]
+  |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+
+if eva_overrides != [] do
+  config :eva_web, :eva, eva_overrides
+end
+
 if config_env() == :dev do
   # Reload browser tabs when matching files change.
   config :eva_web, EvaWebWeb.Endpoint,

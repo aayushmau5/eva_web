@@ -11,8 +11,9 @@ defmodule EvaWeb.Application do
       EvaWebWeb.Telemetry,
       {DNSCluster, query: Application.get_env(:eva_web, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: EvaWeb.PubSub},
-      # Start a worker by calling: EvaWeb.Worker.start_link(arg)
-      # {EvaWeb.Worker, arg},
+      # Eva coding sessions: one supervised Runner per open session, looked up by session id.
+      {Registry, keys: :unique, name: EvaWeb.SessionRegistry},
+      {DynamicSupervisor, strategy: :one_for_one, name: EvaWeb.SessionSupervisor},
       # Start to serve requests, typically the last entry
       EvaWebWeb.Endpoint
     ]

@@ -17,7 +17,8 @@ defmodule EvaWebWeb.Router do
   scope "/", EvaWebWeb do
     pipe_through :browser
 
-    live "/", HomeLive, :index
+    live "/", ChatLive, :index
+    live "/sessions/:id", ChatLive, :show
   end
 
   # Other scopes may use custom stacks.

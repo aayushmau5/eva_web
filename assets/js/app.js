@@ -27,15 +27,64 @@ import topbar from "../vendor/topbar"
 const Hooks = {
   ...colocatedHooks,
 
+  // Follows the stream only while the reader is already at the bottom. Scrolling up to read
+  // earlier output has to win over incoming deltas, otherwise every token drags the viewport
+  // back down.
   ScrollToBottom: {
     mounted() {
+      this.follow = true
+      // Driven by real scroll events rather than sampled during a patch: this element is the
+      // phx-update="stream" container, and beforeUpdate does not fire for it when only its
+      // children change, so anything captured there stays stuck at its mounted value.
+      this.el.addEventListener("scroll", () => {
+        // Our own scrolling must not be mistaken for the reader's.
+        if (!this.programmatic) this.follow = this.atBottom()
+      })
       this.scroll()
     },
     updated() {
-      this.scroll()
+      if (this.follow) this.scroll()
+    },
+    atBottom() {
+      // A little slack: "close enough to the bottom" counts as following along.
+      return this.maxScroll() - this.el.scrollTop < 40
+    },
+    maxScroll() {
+      return this.el.scrollHeight - this.el.clientHeight
     },
     scroll() {
-      this.el.scrollTop = this.el.scrollHeight
+      // Deferred to the next frame so the position is computed against settled layout. Writing
+      // during the patch reads a container that is momentarily short — mid-replacement — and pins
+      // the reader to the top, which then fights whatever they were doing.
+      cancelAnimationFrame(this.raf)
+      this.raf = requestAnimationFrame(() => {
+        const max = this.maxScroll()
+        if (max <= 0) return
+        if (Math.abs(this.el.scrollTop - max) <= 1) return
+        this.programmatic = true
+        this.el.scrollTop = max
+        requestAnimationFrame(() => (this.programmatic = false))
+      })
+    },
+    destroyed() {
+      cancelAnimationFrame(this.raf)
+    },
+  },
+
+  // Whether a <details> is open lives only in the DOM — the server never renders `open`, so a patch
+  // strips whatever the user expanded. While a message streams that happens on every delta, which
+  // snapped thinking blocks shut mid-read.
+  //
+  // Intent is tracked from the `toggle` event rather than read off the element during a patch:
+  // reading mid-patch picked up transient states and left fresh blocks expanded on their own. Here
+  // the element is simply forced back to the last state the user actually chose.
+  KeepOpen: {
+    mounted() {
+      this.userOpen = this.el.open
+      this.el.addEventListener("toggle", () => (this.userOpen = this.el.open))
+    },
+    updated() {
+      if (this.el.open !== this.userOpen) this.el.open = this.userOpen
     },
   },
 
@@ -47,13 +96,27 @@ const Hooks = {
           const text = this.el.value.trim()
           if (text) {
             this.pushEvent("send", {text})
+            this.reset()
           }
         }
       })
-      this.el.addEventListener("input", () => {
-        this.el.style.height = "auto"
-        this.el.style.height = Math.min(this.el.scrollHeight, 144) + "px"
-      })
+      this.el.addEventListener("input", () => this.grow())
+      // Cleared from the server after the prompt is accepted. Clearing it on the form's own
+      // submit event would race LiveView's serialization and send an empty message.
+      this.handleEvent("chat:clear", () => this.reset())
+      this.grow()
+    },
+    grow() {
+      const max = 144
+      this.el.style.height = "auto"
+      this.el.style.height = Math.min(this.el.scrollHeight, max) + "px"
+      // A one-line textarea still reports a scrollHeight a hair over its box, so the scrollbar
+      // shows before there is anything to scroll. Only allow it once the box stops growing.
+      this.el.style.overflowY = this.el.scrollHeight > max ? "auto" : "hidden"
+    },
+    reset() {
+      this.el.value = ""
+      this.grow()
     },
   },
 }

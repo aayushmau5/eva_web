@@ -10,6 +10,13 @@ import Config
 config :eva_web,
   generators: [timestamp_type: :utc_datetime]
 
+# The model and OpenAI-compatible provider every Eva session is started with.
+# Defaults assume LM Studio running locally.
+config :eva_web, :eva,
+  model: "nvidia/nemotron-3-nano-4b",
+  base_url: "http://localhost:1234/v1",
+  provider_name: "lmstudio"
+
 # Configure the endpoint
 config :eva_web, EvaWebWeb.Endpoint,
   url: [host: "localhost"],

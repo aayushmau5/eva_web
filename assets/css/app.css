@@ -102,4 +102,15 @@
 /* Make LiveView wrapper divs transparent for layout */
 [data-phx-session], [data-phx-teleported-src] { display: contents }
 
+/* Tailwind v4's preflight sets buttons to `cursor: default`, so nothing in the UI reads as
+   clickable. Restore the pointer once here rather than adding cursor-pointer to every button,
+   and leave disabled controls alone so they still look inert. */
+@layer base {
+  button:not(:disabled),
+  summary,
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+}
+
 /* This file is for your main application CSS */
