@@ -6,6 +6,12 @@ defmodule EvaWebWeb.ChatComponents do
 
   alias EvaWeb.Sessions.Transcript
 
+  # Syntect ships its own themes (from the Rust two-face crate) and emits inline styles, so the
+  # colours come from MDEx rather than being hand-rolled here. Coldark-Dark's #111b27 background is
+  # the closest of the bundled dark themes to the code blocks elsewhere in the UI.
+  # Requires `config :mdex_native, syntax_highlighter: :syntect`, read at NIF compile time.
+  @code_theme "Coldark-Dark"
+
   @doc "Session list, grouped by project directory."
   attr :groups, :list, required: true
   attr :running_ids, :any, required: true
@@ -209,7 +215,7 @@ defmodule EvaWebWeb.ChatComponents do
                 >{thinking}</div>
               </details>
             <% {:text, text} -> %>
-              <div class="whitespace-pre-wrap break-words text-sm text-zinc-200">{text}</div>
+              <div class="md break-words text-sm text-zinc-200">{markdown(text)}</div>
           <% end %>
         <% end %>
 
@@ -318,6 +324,27 @@ defmodule EvaWebWeb.ChatComponents do
       </form>
     </div>
     """
+  end
+
+  @doc """
+  Renders assistant markdown as sanitized HTML.
+
+  The model's output is untrusted and must never reach `raw/1` unsanitized — the `read` tool alone
+  can drop arbitrary repo file contents into a message, so a file containing `<img onerror=...>`
+  would otherwise become live markup. `hardbreaks` keeps single newlines visible, which is what
+  chat readers expect and plain CommonMark would swallow.
+  """
+  @spec markdown(String.t()) :: Phoenix.HTML.safe() | String.t()
+  def markdown(text) do
+    case MDEx.to_html(text,
+           render: [hardbreaks: true],
+           syntax_highlight: [engine: :syntect, opts: [theme: @code_theme]],
+           sanitize: MDEx.Document.default_sanitize_options()
+         ) do
+      {:ok, html} -> Phoenix.HTML.raw(html)
+      # Show the raw text rather than losing the message; HEEx escapes it.
+      {:error, _reason} -> text
+    end
   end
 
   @doc "Coarse relative time from Eva's float unix-seconds timestamps."

@@ -113,4 +113,74 @@
   }
 }
 
+/* Rendered assistant markdown. Hand-written rather than @tailwindcss/typography, which is an npm
+   plugin and this project builds assets with the standalone binaries. Spacing is deliberately
+   tight — these are chat messages, not article pages. */
+.md > :first-child { margin-top: 0 }
+.md > :last-child { margin-bottom: 0 }
+
+.md p { margin: 0.5rem 0 }
+
+.md h1, .md h2, .md h3, .md h4 {
+  margin: 1rem 0 0.5rem;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--color-zinc-100);
+}
+.md h1 { font-size: 1.125rem }
+.md h2 { font-size: 1rem }
+.md h3, .md h4 { font-size: 0.9375rem }
+
+.md ul, .md ol { margin: 0.5rem 0; padding-left: 1.25rem }
+.md ul { list-style: disc }
+.md ol { list-style: decimal }
+.md li { margin: 0.125rem 0 }
+.md li::marker { color: var(--color-zinc-500) }
+.md li > ul, .md li > ol { margin: 0.125rem 0 }
+
+.md a { color: var(--color-emerald-400); text-decoration: underline }
+.md a:hover { color: var(--color-emerald-300) }
+
+.md strong { font-weight: 600; color: var(--color-zinc-100) }
+.md em { font-style: italic }
+.md del { text-decoration: line-through; color: var(--color-zinc-500) }
+
+.md code {
+  padding: 0.0625rem 0.25rem;
+  font-size: 0.8125rem;
+  background: #1c1c1c;
+  border: 1px solid var(--color-zinc-800);
+  color: var(--color-zinc-200);
+}
+
+/* Wide code must scroll inside its own box so the message column never does. The background is
+   only a fallback: the syntax highlighter sets its own theme colour inline, which wins. */
+.md pre {
+  margin: 0.625rem 0;
+  padding: 0.625rem 0.75rem;
+  overflow-x: auto;
+  background: #111;
+  border: 1px solid var(--color-zinc-800);
+}
+.md pre code {
+  padding: 0;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  background: none;
+  border: 0;
+}
+
+.md blockquote {
+  margin: 0.5rem 0;
+  padding-left: 0.75rem;
+  border-left: 2px solid var(--color-zinc-700);
+  color: var(--color-zinc-400);
+}
+
+.md hr { margin: 0.75rem 0; border: 0; border-top: 1px solid var(--color-zinc-800) }
+
+.md table { margin: 0.5rem 0; display: block; overflow-x: auto; border-collapse: collapse }
+.md th, .md td { padding: 0.25rem 0.5rem; border: 1px solid var(--color-zinc-800); text-align: left }
+.md th { color: var(--color-zinc-200); font-weight: 600 }
+
 /* This file is for your main application CSS */

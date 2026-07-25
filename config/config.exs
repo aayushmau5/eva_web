@@ -10,6 +10,10 @@ import Config
 config :eva_web,
   generators: [timestamp_type: :utc_datetime]
 
+# Syntax highlighting for fenced code blocks in assistant messages. This is read when
+# :mdex_native compiles, so changing it needs `mix deps.clean mdex_native --build`.
+config :mdex_native, syntax_highlighter: :syntect
+
 # The model and OpenAI-compatible provider every Eva session is started with.
 # Defaults assume LM Studio running locally.
 config :eva_web, :eva,
