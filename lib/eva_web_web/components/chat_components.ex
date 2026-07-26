@@ -16,7 +16,8 @@ defmodule EvaWebWeb.ChatComponents do
   attr :groups, :list, required: true
   attr :running_ids, :any, required: true
   attr :active_id, :string, default: nil
-  attr :new_session_cwd, :string, default: nil
+  attr :providers, :list, default: []
+  attr :new_session, :map, default: nil
 
   def sidebar(assigns) do
     ~H"""
@@ -25,40 +26,70 @@ defmodule EvaWebWeb.ChatComponents do
       <button
         id="new-session"
         type="button"
-        phx-click={if @new_session_cwd, do: "cancel_new_session", else: "start_new_session"}
+        phx-click={if @new_session, do: "cancel_new_session", else: "start_new_session"}
         title="New session"
         class="flex size-7 items-center justify-center border border-zinc-700 text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-100"
       >
-        <.icon
-          name={if @new_session_cwd, do: "hero-x-mark-mini", else: "hero-plus-mini"}
-          class="size-4"
-        />
+        <.icon name={if @new_session, do: "hero-x-mark-mini", else: "hero-plus-mini"} class="size-4" />
       </button>
     </div>
 
     <%!-- Sessions belong to a project directory, and the sidebar spans every project, so a new
-         one needs somewhere to live rather than always inheriting the current view's. --%>
+         one needs somewhere to live rather than always inheriting the current view's. Provider and
+         model are fixed at creation too: they are written onto the index entry, and Eva reads the
+         model once when the session starts. --%>
     <form
-      :if={@new_session_cwd}
+      :if={@new_session}
       id="new-session-form"
+      phx-change="new_session_change"
       phx-submit="new_session"
-      class="border-b border-zinc-800 px-4 py-3"
+      class="space-y-3 border-b border-zinc-800 px-4 py-3"
     >
-      <label for="new-session-cwd" class="text-[10px] uppercase tracking-wider text-zinc-600">
-        Working directory
-      </label>
-      <input
-        id="new-session-cwd"
-        type="text"
-        name="cwd"
-        value={@new_session_cwd}
-        autocomplete="off"
-        spellcheck="false"
-        class="mt-1 w-full border border-zinc-700 bg-transparent px-2 py-1 text-xs text-zinc-200 outline-none focus:border-zinc-500"
-      />
+      <div>
+        <label for="new-session-cwd" class="text-[10px] uppercase tracking-wider text-zinc-600">
+          Working directory
+        </label>
+        <input
+          id="new-session-cwd"
+          type="text"
+          name="cwd"
+          value={@new_session.cwd}
+          autocomplete="off"
+          spellcheck="false"
+          class="mt-1 w-full border border-zinc-700 bg-transparent px-2 py-1 text-xs text-zinc-200 outline-none focus:border-zinc-500"
+        />
+      </div>
+
+      <div>
+        <label for="new-session-provider" class="text-[10px] uppercase tracking-wider text-zinc-600">
+          Provider
+        </label>
+        <select
+          id="new-session-provider"
+          name="provider"
+          class="mt-1 w-full border border-zinc-700 bg-transparent px-2 py-1 text-xs text-zinc-200 outline-none focus:border-zinc-500"
+        >
+          <option
+            :for={provider <- @providers}
+            value={provider.name}
+            selected={provider.name == @new_session.provider}
+            class="bg-zinc-900"
+          >
+            {provider.label}
+          </option>
+        </select>
+      </div>
+
+      <div>
+        <label for="new-session-model" class="text-[10px] uppercase tracking-wider text-zinc-600">
+          Model
+        </label>
+        <.model_field new_session={@new_session} />
+      </div>
+
       <button
         type="submit"
-        class="mt-2 w-full bg-[#116a34b5] px-2 py-1 text-xs text-white transition-colors hover:bg-[#116a34]"
+        class="w-full bg-[#116a34b5] px-2 py-1 text-xs text-white transition-colors hover:bg-[#116a34]"
       >
         Create session
       </button>
@@ -121,6 +152,59 @@ defmodule EvaWebWeb.ChatComponents do
         </div>
       </section>
     </nav>
+    """
+  end
+
+  attr :new_session, :map, required: true
+
+  defp model_field(%{new_session: %{models: {:ok, [_ | _] = models}}} = assigns) do
+    assigns = assign(assigns, :models, models)
+
+    ~H"""
+    <select
+      id="new-session-model"
+      name="model"
+      class="mt-1 w-full border border-zinc-700 bg-transparent px-2 py-1 text-xs text-zinc-200 outline-none focus:border-zinc-500"
+    >
+      <option
+        :for={model <- @models}
+        value={model}
+        selected={model == @new_session.model}
+        class="bg-zinc-900"
+      >
+        {model}
+      </option>
+    </select>
+    """
+  end
+
+  # A provider that can't be reached is normal here — LM Studio may simply not be running, and the
+  # opencode key may be unset — so the model stays a free text field rather than an empty dropdown
+  # that blocks the session from being created at all.
+  defp model_field(assigns) do
+    ~H"""
+    <input
+      id="new-session-model"
+      type="text"
+      name="model"
+      value={@new_session.model}
+      autocomplete="off"
+      spellcheck="false"
+      class="mt-1 w-full border border-zinc-700 bg-transparent px-2 py-1 text-xs text-zinc-200 outline-none focus:border-zinc-500"
+    />
+    <p :if={@new_session.models == :loading} class="mt-1 text-[10px] text-zinc-600">
+      Loading models…
+    </p>
+    <p
+      :if={match?({:error, _reason}, @new_session.models)}
+      id="new-session-model-error"
+      class="mt-1 text-[10px] text-amber-600/90"
+    >
+      {elem(@new_session.models, 1)}
+    </p>
+    <p :if={@new_session.models == {:ok, []}} class="mt-1 text-[10px] text-zinc-600">
+      Provider listed no models.
+    </p>
     """
   end
 

@@ -45,6 +45,42 @@ defmodule EvaWebWeb.ChatLiveTest do
     end
   end
 
+  describe "new session form" do
+    test "offers a provider for every one Eva knows", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      html = render_click(view, "start_new_session")
+
+      assert html =~ ~s|id="new-session-form"|
+
+      for provider <- EvaWeb.Providers.all() do
+        assert has_element?(view, ~s|#new-session-provider option[value="#{provider.name}"]|)
+      end
+    end
+
+    test "an unreachable provider leaves the model as a text field", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      render_click(view, "start_new_session")
+      html = render_async(view)
+
+      # config/test.exs points the default provider at a closed port.
+      assert html =~ "Could not reach"
+      assert has_element?(view, ~s|input#new-session-model|)
+      refute has_element?(view, ~s|select#new-session-model|)
+    end
+
+    test "the form closes again", %{conn: conn} do
+      {:ok, view, _html} = live(conn, ~p"/")
+
+      render_click(view, "start_new_session")
+      assert has_element?(view, "#new-session-form")
+
+      render_click(view, "cancel_new_session")
+      refute has_element?(view, "#new-session-form")
+    end
+  end
+
   describe "sidebar" do
     test "session links point at their own route", %{conn: conn} do
       {:ok, view, _html} = live(conn, ~p"/")

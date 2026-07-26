@@ -13,6 +13,7 @@ defmodule EvaWebWeb.ChatLive do
 
   alias Eva.Agent.Events
   alias Eva.Agent.Messages
+  alias EvaWeb.Providers
   alias EvaWeb.Sessions
   alias EvaWeb.Sessions.Transcript
 
@@ -32,7 +33,8 @@ defmodule EvaWebWeb.ChatLive do
        tool_args: %{},
        monitor_ref: nil,
        pending_delete: nil,
-       new_session_cwd: nil
+       providers: Providers.all(),
+       new_session: nil
      )
      |> assign_sessions()
      |> stream(:messages, [])}
@@ -63,19 +65,47 @@ defmodule EvaWebWeb.ChatLive do
 
   @impl true
   def handle_event("start_new_session", _params, socket) do
-    {:noreply, assign(socket, :new_session_cwd, default_cwd(socket))}
+    form = %{
+      cwd: default_cwd(socket),
+      provider: Providers.default_name(),
+      model: Providers.default_model(),
+      models: :loading
+    }
+
+    {:noreply, socket |> assign(:new_session, form) |> load_models()}
   end
 
   def handle_event("cancel_new_session", _params, socket) do
-    {:noreply, assign(socket, :new_session_cwd, nil)}
+    {:noreply, assign(socket, :new_session, nil)}
   end
 
-  def handle_event("new_session", %{"cwd" => cwd}, socket) do
-    case Sessions.create(cwd) do
+  # Switching provider throws the model list away rather than filtering it: the ids are the
+  # provider's own, so a model picked for one is meaningless against another.
+  def handle_event("new_session_change", params, socket) do
+    %{"cwd" => cwd, "provider" => provider, "model" => model} = params
+    previous = socket.assigns.new_session
+    switched? = provider != previous.provider
+
+    form = %{
+      previous
+      | cwd: cwd,
+        provider: provider,
+        model: if(switched?, do: Providers.default_model(), else: model),
+        models: if(switched?, do: :loading, else: previous.models)
+    }
+
+    socket = assign(socket, :new_session, form)
+    {:noreply, if(switched?, do: load_models(socket), else: socket)}
+  end
+
+  def handle_event("new_session", %{"cwd" => cwd} = params, socket) do
+    opts = [provider: params["provider"], model: params["model"]]
+
+    case Sessions.create(cwd, opts) do
       {:ok, session_id} ->
         {:noreply,
          socket
-         |> assign(:new_session_cwd, nil)
+         |> assign(:new_session, nil)
          |> assign_sessions()
          |> push_patch(to: ~p"/sessions/#{session_id}")}
 
@@ -238,6 +268,24 @@ defmodule EvaWebWeb.ChatLive do
 
   def handle_info(_message, socket), do: {:noreply, socket}
 
+  # -- Model lookup --
+
+  @impl true
+  def handle_async(:provider_models, {:ok, {provider, result}}, socket) do
+    {:noreply, apply_models(socket, provider, result)}
+  end
+
+  def handle_async(:provider_models, {:exit, reason}, socket) do
+    case socket.assigns.new_session do
+      %{models: :loading} = form ->
+        failed = {:error, "Model lookup failed: #{inspect(reason)}"}
+        {:noreply, assign(socket, :new_session, %{form | models: failed})}
+
+      _other ->
+        {:noreply, socket}
+    end
+  end
+
   # -- Render --
 
   @impl true
@@ -249,7 +297,8 @@ defmodule EvaWebWeb.ChatLive do
           groups={@groups}
           running_ids={@running_ids}
           active_id={@session_id}
-          new_session_cwd={@new_session_cwd}
+          providers={@providers}
+          new_session={@new_session}
         />
       </:sidebar>
 
@@ -259,8 +308,16 @@ defmodule EvaWebWeb.ChatLive do
             {@session.title || "Untitled session"}
           </span>
           <span class="truncate text-xs text-zinc-600" title={@session.cwd}>{@session.cwd}</span>
-          <span class="ml-auto shrink-0 border border-zinc-800 px-2 py-0.5 text-[10px] text-zinc-500">
-            {@session.model}
+          <span class="ml-auto flex shrink-0 items-center gap-1.5">
+            <span
+              :if={Providers.label(@session.provider_name)}
+              class="border border-zinc-800 px-2 py-0.5 text-[10px] text-zinc-600"
+            >
+              {Providers.label(@session.provider_name)}
+            </span>
+            <span class="border border-zinc-800 px-2 py-0.5 text-[10px] text-zinc-500">
+              {@session.model}
+            </span>
           </span>
         <% else %>
           <span class="text-sm font-medium text-zinc-500">No session selected</span>
@@ -355,6 +412,38 @@ defmodule EvaWebWeb.ChatLive do
   defp assign_sessions(socket) do
     assign(socket, groups: Sessions.list_grouped(), running_ids: Sessions.running_ids())
   end
+
+  # A network call, so off the LiveView process. One async name means switching provider twice in a
+  # row cancels the first lookup, and the provider rides along in the reply so a result that
+  # arrives after the user moved on can be recognised as stale.
+  defp load_models(socket) do
+    provider = socket.assigns.new_session.provider
+    start_async(socket, :provider_models, fn -> {provider, Providers.list_models(provider)} end)
+  end
+
+  # The form may have been closed, or switched to another provider, while the lookup was in
+  # flight — an answer nobody is looking at any more is dropped.
+  defp apply_models(
+         %{assigns: %{new_session: %{provider: provider} = form}} = socket,
+         provider,
+         result
+       ) do
+    assign(socket, :new_session, %{form | models: result, model: choose_model(result, form.model)})
+  end
+
+  defp apply_models(socket, _provider, _result), do: socket
+
+  # Keeps what's in the field when the provider actually offers it, so a configured default
+  # survives; otherwise the picker has to land on something the provider will accept.
+  defp choose_model({:ok, models}, current) do
+    cond do
+      current in models -> current
+      models == [] -> current
+      true -> hd(models)
+    end
+  end
+
+  defp choose_model({:error, _reason}, current), do: current
 
   defp next_id(socket) do
     index = socket.assigns.next_index

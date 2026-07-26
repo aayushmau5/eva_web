@@ -10,6 +10,11 @@ config :eva_web, EvaWebWeb.Endpoint,
 # In test we don't send emails
 config :eva_web, EvaWeb.Mailer, adapter: Swoosh.Adapters.Test
 
+# The new-session picker asks the provider for its model list. Point the default provider at a
+# closed port so the suite exercises the unreachable path deterministically, instead of depending
+# on whether LM Studio happens to be running on the machine.
+config :eva_web, :eva, base_url: "http://127.0.0.1:1"
+
 # Disable swoosh api client as it is only required for production adapters
 config :swoosh, :api_client, false
 

@@ -14,12 +14,12 @@ config :eva_web,
 # :mdex_native compiles, so changing it needs `mix deps.clean mdex_native --build`.
 config :mdex_native, syntax_highlighter: :syntect
 
-# The model and OpenAI-compatible provider every Eva session is started with.
-# Defaults assume LM Studio running locally.
+# Defaults the new-session picker starts on. `provider` must name one of `EvaWeb.Providers.all/0`;
+# `base_url` only moves the local LM Studio endpoint, hosted providers bring their own.
 config :eva_web, :eva,
+  provider: "lmstudio",
   model: "nvidia/nemotron-3-nano-4b",
-  base_url: "http://localhost:1234/v1",
-  provider_name: "lmstudio"
+  base_url: "http://localhost:1234/v1"
 
 # Configure the endpoint
 config :eva_web, EvaWebWeb.Endpoint,

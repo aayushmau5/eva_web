@@ -14,6 +14,7 @@ defmodule EvaWeb.Sessions do
   alias Eva.Agent.Session.Entries.SessionIndexEntry
   alias Eva.Coding.Paths, as: EvaPaths
   alias Eva.Coding.SessionIndexManager
+  alias EvaWeb.Providers
   alias EvaWeb.Sessions.Runner
 
   @index_topic "eva:sessions"
@@ -62,25 +63,37 @@ defmodule EvaWeb.Sessions do
 
   The index entry is written up front so the session shows in the sidebar before its first
   message. `title` is left nil so Eva's auto-naming still claims it on the first prompt.
+
+  `:provider` and `:model` are recorded on the entry and are what the session actually runs
+  against — see `EvaWeb.Sessions.Runner`. Both fall back to the configured defaults, so
+  `create(cwd)` still means "a session like every other one".
   """
-  @spec create(String.t()) :: {:ok, String.t()} | {:error, String.t()}
-  def create(cwd) do
+  @spec create(String.t(), keyword()) :: {:ok, String.t()} | {:error, String.t()}
+  def create(cwd, opts \\ []) do
     cwd = Path.expand(cwd)
+    provider_name = presence(opts[:provider]) || Providers.default_name()
+    model = presence(opts[:model]) || Providers.default_model()
 
-    if File.dir?(cwd) do
-      config = eva_config()
+    cond do
+      not File.dir?(cwd) ->
+        {:error, "#{cwd} is not a directory"}
 
-      entry =
-        SessionIndexManager.create_index(manager(), %{
-          cwd: cwd,
-          model: config[:model],
-          provider_name: config[:provider_name]
-        })
+      not Providers.known?(provider_name) ->
+        {:error, "#{provider_name} is not a provider Eva knows"}
 
-      broadcast_index_change()
-      {:ok, entry.id}
-    else
-      {:error, "#{cwd} is not a directory"}
+      is_nil(model) ->
+        {:error, "pick a model first"}
+
+      true ->
+        entry =
+          SessionIndexManager.create_index(manager(), %{
+            cwd: cwd,
+            model: model,
+            provider_name: provider_name
+          })
+
+        broadcast_index_change()
+        {:ok, entry.id}
     end
   end
 
@@ -204,11 +217,20 @@ defmodule EvaWeb.Sessions do
 
   # -- Config --
 
-  @doc "Model and provider settings every session is started with."
+  @doc "Model and provider defaults new sessions are created with."
   @spec eva_config() :: keyword()
   def eva_config, do: Application.get_env(:eva_web, :eva, [])
 
   # -- Private --
+
+  defp presence(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp presence(_value), do: nil
 
   defp via(session_id), do: Runner.via(session_id)
 

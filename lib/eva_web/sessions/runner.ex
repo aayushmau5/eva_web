@@ -19,10 +19,10 @@ defmodule EvaWeb.Sessions.Runner do
   alias Eva.Agent.Events
   alias Eva.Agent.Messages
   alias Eva.Agent.Session.Storage
-  alias Eva.AI.Config, as: ProviderConfig
   alias Eva.Coding.Session, as: CodingSession
   alias Eva.Coding.Session.SessionConfig
   alias Eva.Coding.SessionIndexManager
+  alias EvaWeb.Providers
   alias EvaWeb.Sessions
 
   # Eva's naming Task can finish after the agent run does; re-check once so the sidebar picks the
@@ -63,20 +63,13 @@ defmodule EvaWeb.Sessions.Runner do
   end
 
   defp start_session(session_id, entry) do
-    config = Sessions.eva_config()
-
-    provider_config = %ProviderConfig.OpenAICompatible{
-      base_url: config[:base_url],
-      provider_name: config[:provider_name]
-    }
-
     session_config = %SessionConfig{
       cwd: entry.cwd,
       storage: Storage.Jsonl.new(entry.session_path),
       session_index_manager: SessionIndexManager.new(),
       session_id: entry.id,
-      model: config[:model],
-      provider_config: provider_config,
+      model: entry.model || Providers.default_model(),
+      provider_config: provider_config(entry),
       listener_pid: self()
     }
 
@@ -174,6 +167,12 @@ defmodule EvaWeb.Sessions.Runner do
   end
 
   # -- Private --
+
+  # Sessions written before the provider was pickable, or against a provider that has since been
+  # dropped from the catalog, still have to open — they just open on the configured default.
+  defp provider_config(entry) do
+    Providers.config(entry.provider_name) || Providers.config(Providers.default_name())
+  end
 
   # Mirrored into this process's registry value so the sidebar can read every session's state in a
   # single ETS lookup instead of calling each runner.
