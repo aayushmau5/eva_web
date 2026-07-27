@@ -51,7 +51,7 @@ defmodule EvaWeb.Sessions do
         sessions: Enum.sort_by(sessions, & &1.updated_at, :desc)
       }
     end)
-    |> Enum.sort_by(& &1.updated_at, :desc)
+    |> Enum.sort_by(& &1.label)
   end
 
   @doc "The index entry for `session_id`, or nil."

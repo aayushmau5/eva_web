@@ -34,7 +34,11 @@ defmodule EvaWebWeb.ChatLive do
        monitor_ref: nil,
        pending_delete: nil,
        providers: Providers.all(),
-       new_session: nil
+       new_session: nil,
+       new_project: nil,
+       queued_messages: [],
+       last_model: nil,
+       last_provider: nil
      )
      |> assign_sessions()
      |> stream(:messages, [])}
@@ -64,15 +68,44 @@ defmodule EvaWebWeb.ChatLive do
   # -- User actions --
 
   @impl true
-  def handle_event("start_new_session", _params, socket) do
+  def handle_event("start_new_project", _params, socket) do
+    {:noreply,
+     socket |> assign(:new_project, %{cwd: default_cwd(socket)}) |> assign(:new_session, nil)}
+  end
+
+  def handle_event("cancel_new_project", _params, socket) do
+    {:noreply, assign(socket, :new_project, nil)}
+  end
+
+  def handle_event("new_project_change", %{"cwd" => cwd}, socket) do
+    {:noreply, assign(socket, :new_project, %{cwd: cwd})}
+  end
+
+  def handle_event("new_project", %{"cwd" => cwd}, socket) do
+    case Sessions.create(cwd, []) do
+      {:ok, session_id} ->
+        {:noreply,
+         socket
+         |> assign(:new_project, nil)
+         |> assign_sessions()
+         |> push_patch(to: ~p"/sessions/#{session_id}")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Could not create session: #{reason}")}
+    end
+  end
+
+  def handle_event("start_new_session", params, socket) do
+    cwd = Map.get(params, "cwd", default_cwd(socket))
+
     form = %{
-      cwd: default_cwd(socket),
-      provider: Providers.default_name(),
-      model: Providers.default_model(),
+      cwd: cwd,
+      provider: socket.assigns.last_provider || Providers.default_name(),
+      model: socket.assigns.last_model || Providers.default_model(),
       models: :loading
     }
 
-    {:noreply, socket |> assign(:new_session, form) |> load_models()}
+    {:noreply, socket |> assign(:new_session, form) |> assign(:new_project, nil) |> load_models()}
   end
 
   def handle_event("cancel_new_session", _params, socket) do
@@ -106,6 +139,8 @@ defmodule EvaWebWeb.ChatLive do
         {:noreply,
          socket
          |> assign(:new_session, nil)
+         |> assign(:last_model, params["model"] || Providers.default_model())
+         |> assign(:last_provider, params["provider"] || Providers.default_name())
          |> assign_sessions()
          |> push_patch(to: ~p"/sessions/#{session_id}")}
 
@@ -125,15 +160,27 @@ defmodule EvaWebWeb.ChatLive do
         # The user's bubble is rendered from Eva's own MessageStart rather than inserted
         # optimistically, because Eva rewrites `/skill:` prompts before storing them.
         case Sessions.prompt(socket.assigns.session_id, text) do
-          :ok -> {:noreply, push_event(socket, "chat:clear", %{})}
-          {:error, reason} -> {:noreply, put_flash(socket, :error, reason)}
+          :ok ->
+            socket =
+              if socket.assigns.running?,
+                do: assign(socket, :queued_messages, socket.assigns.queued_messages ++ [text]),
+                else: socket
+
+            {:noreply, push_event(socket, "chat:clear", %{})}
+
+          {:error, reason} ->
+            {:noreply, put_flash(socket, :error, reason)}
         end
     end
   end
 
   def handle_event("cancel", _params, socket) do
     if socket.assigns.session_id, do: Sessions.cancel(socket.assigns.session_id)
-    {:noreply, socket}
+
+    {:noreply,
+     socket
+     |> assign(queued_messages: [], running?: false, current_id: nil)
+     |> assign_sessions()}
   end
 
   def handle_event("confirm_delete", %{"id" => session_id}, socket) do
@@ -177,6 +224,13 @@ defmodule EvaWebWeb.ChatLive do
         socket
       ) do
     {id, socket} = next_id(socket)
+
+    socket =
+      case socket.assigns.queued_messages do
+        [] -> socket
+        [_ | rest] -> assign(socket, :queued_messages, rest)
+      end
+
     {:noreply, stream_insert(socket, :messages, Transcript.user_item(id, message))}
   end
 
@@ -299,6 +353,7 @@ defmodule EvaWebWeb.ChatLive do
           active_id={@session_id}
           providers={@providers}
           new_session={@new_session}
+          new_project={@new_project}
         />
       </:sidebar>
 
@@ -349,6 +404,18 @@ defmodule EvaWebWeb.ChatLive do
         </div>
       </div>
 
+      <div
+        :if={@queued_messages != []}
+        class="shrink-0 border-t border-zinc-800 bg-[#0c0c0c] px-4 py-2"
+      >
+        <div class="mx-auto flex max-w-3xl flex-col gap-1.5">
+          <div :for={msg <- @queued_messages} class="flex items-center gap-2 text-sm text-zinc-500">
+            <.icon name="hero-arrow-path-mini" class="size-3.5 shrink-0 animate-spin text-zinc-600" />
+            <span class="truncate">{msg}</span>
+          </div>
+        </div>
+      </div>
+
       <.composer running={@running?} disabled={is_nil(@session_id)} />
       <.delete_modal session={@pending_delete} />
     </Layouts.app>
@@ -375,7 +442,9 @@ defmodule EvaWebWeb.ChatLive do
         next_index: length(items),
         tool_args: tool_args(messages),
         monitor_ref: Process.monitor(pid),
-        page_title: session.title || "Eva"
+        page_title: session.title || "Eva",
+        last_model: session.model,
+        last_provider: session.provider_name
       )
       |> assign_sessions()
       |> stream(:messages, items, reset: true)
@@ -404,7 +473,8 @@ defmodule EvaWebWeb.ChatLive do
       next_index: 0,
       tool_args: %{},
       monitor_ref: nil,
-      page_title: "Eva"
+      page_title: "Eva",
+      queued_messages: []
     )
     |> stream(:messages, [], reset: true)
   end

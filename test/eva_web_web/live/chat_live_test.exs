@@ -13,7 +13,7 @@ defmodule EvaWebWeb.ChatLiveTest do
 
       assert has_element?(view, "#sidebar")
       assert has_element?(view, "#session-list")
-      assert has_element?(view, "#new-session")
+      assert has_element?(view, "#new-project")
       assert has_element?(view, "#composer")
       # No transcript container until a session is opened.
       refute has_element?(view, "#messages")

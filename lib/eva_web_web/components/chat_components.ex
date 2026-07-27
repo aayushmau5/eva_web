@@ -18,48 +18,84 @@ defmodule EvaWebWeb.ChatComponents do
   attr :active_id, :string, default: nil
   attr :providers, :list, default: []
   attr :new_session, :map, default: nil
+  attr :new_project, :map, default: nil
 
   def sidebar(assigns) do
     ~H"""
     <div class="flex h-12 shrink-0 items-center justify-between border-b border-zinc-800 px-4">
       <span class="text-sm font-semibold tracking-wide text-zinc-300">Eva</span>
       <button
-        id="new-session"
+        id="new-project"
         type="button"
-        phx-click={if @new_session, do: "cancel_new_session", else: "start_new_session"}
-        title="New session"
+        phx-click={
+          cond do
+            @new_project -> "cancel_new_project"
+            @new_session -> "cancel_new_session"
+            true -> "start_new_project"
+          end
+        }
+        title={if @new_project || @new_session, do: "Cancel", else: "New project"}
         class="flex size-7 items-center justify-center border border-zinc-700 text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-100"
       >
-        <.icon name={if @new_session, do: "hero-x-mark-mini", else: "hero-plus-mini"} class="size-4" />
+        <.icon
+          name={if @new_project || @new_session, do: "hero-x-mark-mini", else: "hero-plus-mini"}
+          class="size-4"
+        />
       </button>
     </div>
 
-    <%!-- Sessions belong to a project directory, and the sidebar spans every project, so a new
-         one needs somewhere to live rather than always inheriting the current view's. Provider and
-         model are fixed at creation too: they are written onto the index entry, and Eva reads the
-         model once when the session starts. --%>
+    <%!-- New project form: just a directory path. --%>
     <form
-      :if={@new_session}
-      id="new-session-form"
-      phx-change="new_session_change"
-      phx-submit="new_session"
+      :if={@new_project}
+      id="new-project-form"
+      phx-change="new_project_change"
+      phx-submit="new_project"
       class="space-y-3 border-b border-zinc-800 px-4 py-3"
     >
       <div>
-        <label for="new-session-cwd" class="text-[10px] uppercase tracking-wider text-zinc-600">
-          Working directory
+        <label for="new-project-cwd" class="text-[10px] uppercase tracking-wider text-zinc-600">
+          Project directory
         </label>
         <input
-          id="new-session-cwd"
+          id="new-project-cwd"
           type="text"
           name="cwd"
-          value={@new_session.cwd}
+          value={@new_project.cwd}
           autocomplete="off"
           spellcheck="false"
           class="mt-1 w-full border border-zinc-700 bg-transparent px-2 py-1 text-xs text-zinc-200 outline-none focus:border-zinc-500"
         />
       </div>
+      <button
+        type="submit"
+        class="w-full bg-[#116a34b5] px-2 py-1 text-xs text-white transition-colors hover:bg-[#116a34]"
+      >
+        Open project
+      </button>
+    </form>
 
+    <%!-- Standalone session form when no project group matches the cwd. --%>
+    <form
+      :if={@new_session && not Enum.any?(@groups, &(&1.cwd == @new_session.cwd))}
+      id="new-session-form"
+      phx-change="new_session_change"
+      phx-submit="new_session"
+      class="space-y-3 border-b border-zinc-800 px-4 py-3"
+    >
+      <div class="flex items-center justify-between">
+        <span class="truncate text-[10px] font-medium uppercase tracking-wider text-zinc-500">
+          {Path.basename(@new_session.cwd)}
+        </span>
+        <button
+          type="button"
+          phx-click="cancel_new_session"
+          title="Cancel"
+          class="ml-2 shrink-0 text-zinc-600 hover:text-zinc-300"
+        >
+          <.icon name="hero-x-mark-mini" class="size-3.5" />
+        </button>
+      </div>
+      <input type="hidden" name="cwd" value={@new_session.cwd} />
       <div>
         <label for="new-session-provider" class="text-[10px] uppercase tracking-wider text-zinc-600">
           Provider
@@ -79,14 +115,12 @@ defmodule EvaWebWeb.ChatComponents do
           </option>
         </select>
       </div>
-
       <div>
         <label for="new-session-model" class="text-[10px] uppercase tracking-wider text-zinc-600">
           Model
         </label>
         <.model_field new_session={@new_session} />
       </div>
-
       <button
         type="submit"
         class="w-full bg-[#116a34b5] px-2 py-1 text-xs text-white transition-colors hover:bg-[#116a34]"
@@ -101,12 +135,93 @@ defmodule EvaWebWeb.ChatComponents do
       </p>
 
       <section :for={group <- @groups} class="mb-3">
-        <h3
-          class="truncate px-4 py-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-600"
-          title={group.cwd}
-        >
-          {group.label}
+        <h3 class="group flex items-center justify-between px-4 py-1">
+          <span
+            class="truncate text-[10px] font-semibold uppercase tracking-wider text-zinc-600"
+            title={group.cwd}
+          >
+            {group.label}
+          </span>
+          <button
+            type="button"
+            phx-click={
+              if @new_session && @new_session.cwd == group.cwd,
+                do: "cancel_new_session",
+                else: "start_new_session"
+            }
+            phx-value-cwd={group.cwd}
+            title={
+              if @new_session && @new_session.cwd == group.cwd,
+                do: "Cancel",
+                else: "New session"
+            }
+            class="ml-1 flex size-5 shrink-0 items-center justify-center text-zinc-700 opacity-0 transition hover:text-zinc-300 group-hover:opacity-100"
+          >
+            <.icon
+              name={
+                if @new_session && @new_session.cwd == group.cwd,
+                  do: "hero-x-mark-mini",
+                  else: "hero-plus-mini"
+              }
+              class="size-3"
+            />
+          </button>
         </h3>
+
+        <%!-- Inline new-session form for this project. --%>
+        <form
+          :if={@new_session && @new_session.cwd == group.cwd}
+          id="new-session-form"
+          phx-change="new_session_change"
+          phx-submit="new_session"
+          class="space-y-2 border-b border-zinc-800/50 px-4 pb-3"
+        >
+          <input type="hidden" name="cwd" value={@new_session.cwd} />
+          <div>
+            <label
+              for="new-session-provider"
+              class="text-[10px] uppercase tracking-wider text-zinc-600"
+            >
+              Provider
+            </label>
+            <select
+              id="new-session-provider"
+              name="provider"
+              class="mt-1 w-full border border-zinc-700 bg-transparent px-2 py-1 text-xs text-zinc-200 outline-none focus:border-zinc-500"
+            >
+              <option
+                :for={provider <- @providers}
+                value={provider.name}
+                selected={provider.name == @new_session.provider}
+                class="bg-zinc-900"
+              >
+                {provider.label}
+              </option>
+            </select>
+          </div>
+          <div>
+            <label for="new-session-model" class="text-[10px] uppercase tracking-wider text-zinc-600">
+              Model
+            </label>
+            <.model_field new_session={@new_session} />
+          </div>
+          <div class="flex gap-2">
+            <button
+              type="button"
+              phx-click="cancel_new_session"
+              class="flex-1 border border-zinc-700 px-2 py-1 text-xs text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-200"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              class="flex-1 bg-[#116a34b5] px-2 py-1 text-xs text-white transition-colors hover:bg-[#116a34]"
+            >
+              Create
+            </button>
+          </div>
+        </form>
+
         <div
           :for={session <- group.sessions}
           id={"session-#{session.id}"}
@@ -333,11 +448,7 @@ defmodule EvaWebWeb.ChatComponents do
           <span class="font-medium text-zinc-300">{@item.name}</span>
           <span class="truncate text-zinc-600">{Transcript.args_summary(@item.args)}</span>
         </summary>
-        <pre
-          :if={@item.text != ""}
-          phx-no-curly-interpolation
-          class="max-h-64 overflow-auto border-t border-zinc-800 px-3 py-2 text-[11px] leading-relaxed text-zinc-400"
-        ><%= @item.text %></pre>
+        <.tool_body item={@item} />
       </details>
     </div>
     """
@@ -348,6 +459,48 @@ defmodule EvaWebWeb.ChatComponents do
     <div class="px-4 py-2 text-center text-xs italic text-zinc-600">{@item.text}</div>
     """
   end
+
+  attr :item, :map, required: true
+
+  defp tool_body(assigns) do
+    assigns =
+      assigns
+      |> assign(
+        :has_patch,
+        assigns.item.name == "edit" && is_binary(assigns.item.patch) && assigns.item.patch != ""
+      )
+      |> assign(:has_text, is_binary(assigns.item.text) && assigns.item.text != "")
+
+    ~H"""
+    <%= if @has_patch do %>
+      <div class="border-t border-zinc-800">
+        <div class="flex items-center justify-between px-3 py-1.5">
+          <span class="text-[10px] font-medium uppercase tracking-wider text-zinc-600">
+            Patch
+          </span>
+        </div>
+        <pre
+          phx-no-curly-interpolation
+          class="max-h-64 overflow-auto px-3 pb-2 text-[11px] leading-relaxed"
+        ><code><%= for line <- String.split(@item.patch, "\n") do %><span class={diff_line_class(line)}><%= line %><%= "\n" %></span><% end %></code></pre>
+      </div>
+    <% end %>
+    <%= if @has_text do %>
+      <pre
+        phx-no-curly-interpolation
+        class={[
+          "max-h-64 overflow-auto px-3 py-2 text-[11px] leading-relaxed text-zinc-400",
+          !@has_patch && "border-t border-zinc-800"
+        ]}
+      ><%= @item.text %></pre>
+    <% end %>
+    """
+  end
+
+  defp diff_line_class(<<"+", _rest::binary>>), do: "block bg-emerald-950/40 text-emerald-400"
+  defp diff_line_class(<<"-", _rest::binary>>), do: "block bg-red-950/40 text-red-400"
+  defp diff_line_class(<<"@", _rest::binary>>), do: "block text-cyan-500"
+  defp diff_line_class(_), do: "block text-zinc-500"
 
   attr :status, :atom, default: nil
 

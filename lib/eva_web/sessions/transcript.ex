@@ -22,7 +22,8 @@ defmodule EvaWeb.Sessions.Transcript do
           name: String.t() | nil,
           args: map() | nil,
           status: status() | nil,
-          error: String.t() | nil
+          error: String.t() | nil,
+          patch: String.t() | nil
         }
 
   @base %{
@@ -33,7 +34,8 @@ defmodule EvaWeb.Sessions.Transcript do
     name: nil,
     args: nil,
     status: nil,
-    error: nil
+    error: nil,
+    patch: nil
   }
 
   @doc """
@@ -94,6 +96,8 @@ defmodule EvaWeb.Sessions.Transcript do
   @doc "A finished tool row, from a `ToolExecutionEnd` event."
   @spec tool_finished(String.t(), String.t(), map(), struct(), boolean()) :: item()
   def tool_finished(tool_call_id, tool_name, args, result, is_error?) do
+    details = Map.get(result, :details) || %{}
+
     %{
       @base
       | id: tool_id(tool_call_id),
@@ -101,7 +105,8 @@ defmodule EvaWeb.Sessions.Transcript do
         name: tool_name,
         args: args,
         status: if(is_error?, do: :error, else: :ok),
-        text: Messages.content_text(result.content)
+        text: Messages.content_text(result.content),
+        patch: Map.get(details, :patch) || details["patch"]
     }
   end
 
@@ -130,6 +135,8 @@ defmodule EvaWeb.Sessions.Transcript do
   end
 
   defp to_item(%Messages.ToolResultMessage{} = message, _index, args) do
+    details = message.details || %{}
+
     [
       %{
         @base
@@ -138,7 +145,8 @@ defmodule EvaWeb.Sessions.Transcript do
           name: message.tool_name,
           args: Map.get(args, message.tool_call_id),
           status: if(message.is_error, do: :error, else: :ok),
-          text: Messages.ToolResultMessage.text(message)
+          text: Messages.ToolResultMessage.text(message),
+          patch: Map.get(details, :patch) || details["patch"]
       }
     ]
   end
