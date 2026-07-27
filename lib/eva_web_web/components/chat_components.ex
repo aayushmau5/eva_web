@@ -421,6 +421,7 @@ defmodule EvaWebWeb.ChatComponents do
   @spec markdown(String.t()) :: Phoenix.HTML.safe() | String.t()
   def markdown(text) do
     case MDEx.to_html(text,
+           extension: [table: true, strikethrough: true, tasklist: true, autolink: true],
            render: [hardbreaks: true],
            syntax_highlight: [engine: :syntect, opts: [theme: @code_theme]],
            sanitize: MDEx.Document.default_sanitize_options()
