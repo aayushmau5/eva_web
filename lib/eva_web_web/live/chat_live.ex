@@ -81,17 +81,31 @@ defmodule EvaWebWeb.ChatLive do
     {:noreply, assign(socket, :new_project, %{cwd: cwd})}
   end
 
-  def handle_event("new_project", %{"cwd" => cwd}, socket) do
-    case Sessions.create(cwd, []) do
-      {:ok, session_id} ->
-        {:noreply,
-         socket
-         |> assign(:new_project, nil)
-         |> assign_sessions()
-         |> push_patch(to: ~p"/sessions/#{session_id}")}
+  def handle_event("browse_project_dir", _, socket) do
+    case pick_directory() do
+      nil -> {:noreply, socket}
+      path -> {:noreply, assign(socket, :new_project, %{cwd: path})}
+    end
+  end
 
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Could not create session: #{reason}")}
+  def handle_event("new_project", %{"cwd" => cwd}, socket) do
+    cwd = Path.expand(cwd)
+
+    if File.dir?(cwd) do
+      form = %{
+        cwd: cwd,
+        provider: socket.assigns.last_provider || Providers.default_name(),
+        model: socket.assigns.last_model,
+        models: :loading
+      }
+
+      {:noreply,
+       socket
+       |> assign(:new_project, nil)
+       |> assign(:new_session, form)
+       |> load_models()}
+    else
+      {:noreply, put_flash(socket, :error, "#{cwd} is not a directory")}
     end
   end
 
@@ -442,9 +456,7 @@ defmodule EvaWebWeb.ChatLive do
         next_index: length(items),
         tool_args: tool_args(messages),
         monitor_ref: Process.monitor(pid),
-        page_title: session.title || "Eva",
-        last_model: session.model,
-        last_provider: session.provider_name
+        page_title: session.title || "Eva"
       )
       |> assign_sessions()
       |> stream(:messages, items, reset: true)
@@ -536,6 +548,38 @@ defmodule EvaWebWeb.ChatLive do
         tool_call <- Messages.AssistantMessage.tool_calls(message),
         into: %{},
         do: {tool_call.id, tool_call.arguments}
+  end
+
+  defp pick_directory do
+    case :os.type() do
+      {:unix, :darwin} ->
+        case System.cmd("osascript", [
+               "-e",
+               ~s'POSIX path of (choose folder with prompt "Select project directory")'
+             ]) do
+          {path, 0} -> String.trim(path)
+          _ -> nil
+        end
+
+      {:unix, _} ->
+        case System.cmd("which", ["zenity"], stderr_to_stdout: true) do
+          {_, 0} ->
+            case System.cmd("zenity", [
+                   "--file-selection",
+                   "--directory",
+                   "--title=Select project directory"
+                 ]) do
+              {path, 0} -> String.trim(path)
+              _ -> nil
+            end
+
+          _ ->
+            nil
+        end
+
+      _ ->
+        nil
+    end
   end
 
   defp default_cwd(socket) do

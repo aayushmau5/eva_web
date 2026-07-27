@@ -56,15 +56,25 @@ defmodule EvaWebWeb.ChatComponents do
         <label for="new-project-cwd" class="text-[10px] uppercase tracking-wider text-zinc-600">
           Project directory
         </label>
-        <input
-          id="new-project-cwd"
-          type="text"
-          name="cwd"
-          value={@new_project.cwd}
-          autocomplete="off"
-          spellcheck="false"
-          class="mt-1 w-full border border-zinc-700 bg-transparent px-2 py-1 text-xs text-zinc-200 outline-none focus:border-zinc-500"
-        />
+        <div class="mt-1 flex gap-1">
+          <input
+            id="new-project-cwd"
+            type="text"
+            name="cwd"
+            value={@new_project.cwd}
+            autocomplete="off"
+            spellcheck="false"
+            class="flex-1 border border-zinc-700 bg-transparent px-2 py-1 text-xs text-zinc-200 outline-none focus:border-zinc-500"
+          />
+          <button
+            type="button"
+            phx-click="browse_project_dir"
+            title="Browse…"
+            class="flex shrink-0 items-center border border-zinc-700 px-2 text-zinc-500 transition-colors hover:border-zinc-500 hover:text-zinc-300"
+          >
+            <.icon name="hero-folder-open-mini" class="size-3.5" />
+          </button>
+        </div>
       </div>
       <button
         type="submit"
@@ -446,7 +456,7 @@ defmodule EvaWebWeb.ChatComponents do
         <summary class="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-zinc-400 hover:text-zinc-200">
           <.tool_status status={@item.status} />
           <span class="font-medium text-zinc-300">{@item.name}</span>
-          <span class="truncate text-zinc-600">{Transcript.args_summary(@item.args)}</span>
+          <span class="min-w-0 truncate text-zinc-600">{Transcript.args_summary(@item.args)}</span>
         </summary>
         <.tool_body item={@item} />
       </details>
@@ -577,7 +587,9 @@ defmodule EvaWebWeb.ChatComponents do
            extension: [table: true, strikethrough: true, tasklist: true, autolink: true],
            render: [hardbreaks: true],
            syntax_highlight: [engine: :syntect, opts: [theme: @code_theme]],
-           sanitize: MDEx.Document.default_sanitize_options()
+           sanitize:
+             MDEx.Document.default_sanitize_options()
+             |> Keyword.put(:set_tag_attribute_values, %{"a" => %{"target" => "_blank"}})
          ) do
       {:ok, html} -> Phoenix.HTML.raw(html)
       # Show the raw text rather than losing the message; HEEx escapes it.

@@ -204,8 +204,21 @@ defmodule EvaWeb.Sessions.Transcript do
   defp error_message(_message), do: nil
 
   defp inline(value) when is_binary(value) do
-    value |> String.split("\n", parts: 2) |> List.first() |> String.slice(0, 80)
+    value
+    |> String.split("\n", parts: 2)
+    |> List.first()
+    |> then(fn
+      s when byte_size(s) <= 80 -> s
+      s -> String.slice(s, 0, 80) <> "…"
+    end)
   end
 
-  defp inline(value), do: value |> inspect() |> String.slice(0, 80)
+  defp inline(value) do
+    value
+    |> inspect()
+    |> then(fn
+      s when byte_size(s) <= 80 -> s
+      s -> String.slice(s, 0, 80) <> "…"
+    end)
+  end
 end
