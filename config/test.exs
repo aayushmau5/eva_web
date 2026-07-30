@@ -15,6 +15,9 @@ config :eva_web, EvaWeb.Mailer, adapter: Swoosh.Adapters.Test
 # on whether LM Studio happens to be running on the machine.
 config :eva_web, :eva, base_url: "http://127.0.0.1:1"
 
+# Keep the suite away from the real ~/.eva/web.json — it belongs to whoever is running the tests.
+config :eva_web, :settings_path, Path.join(System.tmp_dir!(), "eva_web_test_settings.json")
+
 # Disable swoosh api client as it is only required for production adapters
 config :swoosh, :api_client, false
 

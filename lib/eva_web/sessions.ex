@@ -163,7 +163,8 @@ defmodule EvaWeb.Sessions do
   being asked — an unreadable transcript shouldn't take a LiveView down with it.
   """
   @spec snapshot(String.t()) ::
-          {:ok, %{messages: [struct()], running?: boolean()}} | {:error, term()}
+          {:ok, %{messages: [struct()], running?: boolean(), mcp: EvaWeb.Sessions.MCP.t()}}
+          | {:error, term()}
   def snapshot(session_id) do
     {:ok, Runner.snapshot(via(session_id))}
   catch
@@ -180,6 +181,20 @@ defmodule EvaWeb.Sessions do
   @doc "Interrupts the running agent loop."
   @spec cancel(String.t()) :: :ok
   def cancel(session_id), do: Runner.cancel(via(session_id))
+
+  @doc """
+  Switches an MCP server on or off for a session, or for every session to come.
+
+  See `EvaWeb.Sessions.Runner.set_mcp_enabled/4` for what the two scopes mean. Returns
+  `{:error, reason}` rather than raising if the runner has gone away in between.
+  """
+  @spec set_mcp_enabled(String.t(), String.t(), boolean(), :session | :persist) ::
+          :ok | {:error, term()}
+  def set_mcp_enabled(session_id, name, enabled?, scope) do
+    Runner.set_mcp_enabled(via(session_id), name, enabled?, scope)
+  catch
+    :exit, reason -> {:error, reason}
+  end
 
   @doc """
   Ids of sessions whose agent is currently working, for the sidebar's activity dot.

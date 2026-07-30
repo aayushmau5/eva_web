@@ -109,10 +109,15 @@ const Hooks = {
     grow() {
       const max = 144
       this.el.style.height = "auto"
-      this.el.style.height = Math.min(this.el.scrollHeight, max) + "px"
+      // scrollHeight covers the content and its padding but not the border, and the box is
+      // border-box — so assigning it straight across leaves the last line a border's worth short
+      // and permanently scrolled.
+      const style = getComputedStyle(this.el)
+      const border = parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth)
+      this.el.style.height = Math.min(this.el.scrollHeight + border, max) + "px"
       // A one-line textarea still reports a scrollHeight a hair over its box, so the scrollbar
       // shows before there is anything to scroll. Only allow it once the box stops growing.
-      this.el.style.overflowY = this.el.scrollHeight > max ? "auto" : "hidden"
+      this.el.style.overflowY = this.el.scrollHeight + border > max ? "auto" : "hidden"
     },
     reset() {
       this.el.value = ""

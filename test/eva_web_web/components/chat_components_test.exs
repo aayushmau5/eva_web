@@ -1,9 +1,36 @@
 defmodule EvaWebWeb.ChatComponentsTest do
   use ExUnit.Case, async: true
 
+  import Phoenix.LiveViewTest, only: [render_component: 2]
+
   alias EvaWebWeb.ChatComponents
 
   defp render(text), do: text |> ChatComponents.markdown() |> Phoenix.HTML.safe_to_string()
+
+  defp mcp_server(attrs) do
+    Map.merge(
+      %{
+        name: "github",
+        scope: :global,
+        transport: :stdio,
+        target: "npx -y @modelcontextprotocol/server-github",
+        status: :connected,
+        enabled?: true,
+        config_enabled: true,
+        session_enabled: nil,
+        overridden?: false,
+        tools: [],
+        server_version: "1.2.3",
+        protocol_version: "2025-06-18",
+        error: nil,
+        login_command: nil
+      },
+      attrs
+    )
+  end
+
+  defp mcp_state(servers, diagnostics \\ []),
+    do: %{servers: servers, diagnostics: diagnostics, meta: %{}}
 
   describe "markdown/1" do
     test "renders emphasis and lists" do
@@ -27,7 +54,7 @@ defmodule EvaWebWeb.ChatComponentsTest do
       html = render("```elixir\ndef hello, do: :world\n```")
 
       assert html =~ ~s|<span style="color:|
-      assert html =~ "background-color:#111b27"
+      assert html =~ "background-color:#282828"
     end
 
     test "leaves code without a language alone but still themed" do
@@ -76,6 +103,196 @@ defmodule EvaWebWeb.ChatComponentsTest do
 
       assert html =~ "&lt;script&gt;"
       refute html =~ "<script>"
+    end
+  end
+
+  describe "mcp_indicator/1" do
+    test "counts connected servers against configured ones" do
+      html =
+        render_component(&ChatComponents.mcp_indicator/1,
+          mcp: mcp_state([mcp_server(%{}), mcp_server(%{name: "exa", status: :failed})])
+        )
+
+      assert html =~ "MCP"
+      assert html =~ "1/2"
+    end
+
+    test "stays out of the way when no servers are configured" do
+      assert render_component(&ChatComponents.mcp_indicator/1, mcp: mcp_state([])) =~ ""
+      refute render_component(&ChatComponents.mcp_indicator/1, mcp: mcp_state([])) =~ "mcp-toggle"
+    end
+
+    test "shows up for a config that failed to parse even with no servers" do
+      html = render_component(&ChatComponents.mcp_indicator/1, mcp: mcp_state([], ["bad json"]))
+
+      assert html =~ "mcp-toggle"
+    end
+  end
+
+  describe "mcp_panel/1" do
+    test "renders nothing while closed" do
+      html =
+        render_component(&ChatComponents.mcp_panel/1,
+          mcp: mcp_state([mcp_server(%{})]),
+          open: false
+        )
+
+      refute html =~ "mcp-panel"
+    end
+
+    test "lists a server with its transport, scope and versions" do
+      html =
+        render_component(&ChatComponents.mcp_panel/1,
+          mcp: mcp_state([mcp_server(%{})]),
+          open: true
+        )
+
+      assert html =~ "github"
+      assert html =~ "stdio"
+      assert html =~ "global"
+      assert html =~ "v1.2.3"
+      assert html =~ "2025-06-18"
+      assert html =~ "connected"
+    end
+
+    test "lists the tools a server exposes" do
+      tools = [%{name: "create_issue", description: "Opens an issue", input_schema: %{}}]
+
+      html =
+        render_component(&ChatComponents.mcp_panel/1,
+          mcp: mcp_state([mcp_server(%{tools: tools})]),
+          open: true
+        )
+
+      assert html =~ "1 tool"
+      assert html =~ "create_issue"
+      assert html =~ "Opens an issue"
+    end
+
+    test "surfaces a failure and the login a server is waiting on" do
+      servers = [
+        mcp_server(%{name: "broken", status: :failed, error: "Executable not found: nope"}),
+        mcp_server(%{name: "remote", status: :needs_auth, login_command: "eva mcp login remote"})
+      ]
+
+      html = render_component(&ChatComponents.mcp_panel/1, mcp: mcp_state(servers), open: true)
+
+      assert html =~ "Executable not found: nope"
+      assert html =~ "eva mcp login remote"
+      assert html =~ "needs login"
+    end
+
+    test "shows config diagnostics and a hint when nothing is configured" do
+      html =
+        render_component(&ChatComponents.mcp_panel/1,
+          mcp: mcp_state([], ["Cannot determine MCP server type for demo"]),
+          open: true
+        )
+
+      assert html =~ "Cannot determine MCP server type for demo"
+      assert html =~ "No MCP servers configured"
+      assert html =~ "mcp.json"
+    end
+
+    test "says so when a connected server exposes nothing" do
+      html =
+        render_component(&ChatComponents.mcp_panel/1,
+          mcp: mcp_state([mcp_server(%{})]),
+          open: true
+        )
+
+      assert html =~ "No tools exposed."
+    end
+  end
+
+  describe "mcp_panel/1 toggles" do
+    defp panel(servers) do
+      render_component(&ChatComponents.mcp_panel/1, mcp: mcp_state(servers), open: true)
+    end
+
+    test "a running server offers to be switched off" do
+      html = panel([mcp_server(%{})])
+
+      assert html =~ ~s|id="mcp-switch-github"|
+      assert html =~ ~s|aria-checked="true"|
+      # The click carries the state being asked for, not the current one.
+      assert html =~ ~s|phx-value-enabled="false"|
+      assert html =~ "Disable github"
+    end
+
+    test "a switched-off server offers to be switched back on" do
+      html =
+        panel([mcp_server(%{status: :disabled, enabled?: false, config_enabled: false})])
+
+      assert html =~ ~s|aria-checked="false"|
+      assert html =~ ~s|phx-value-enabled="true"|
+      assert html =~ "Enable github"
+      assert html =~ "off"
+    end
+
+    # Without this the toggle looks permanent, and the user has no way to know their next session
+    # will start with the server back the way the file has it.
+    test "a session override says so and offers to make it permanent" do
+      html =
+        panel([
+          mcp_server(%{
+            status: :disabled,
+            enabled?: false,
+            config_enabled: true,
+            session_enabled: false,
+            overridden?: true
+          })
+        ])
+
+      assert html =~ "This session only"
+      assert html =~ "config says on"
+      assert html =~ ~s|id="mcp-persist-github"|
+      # Persisting writes the state the session is actually in.
+      assert html =~ ~s|phx-click="mcp_persist"|
+    end
+
+    test "a server following its config offers nothing to save" do
+      refute panel([mcp_server(%{})]) =~ "mcp-persist-github"
+    end
+
+    test "an error from before a server was switched off is not shown as a fault" do
+      html =
+        panel([mcp_server(%{status: :disabled, enabled?: false, error: nil, tools: []})])
+
+      refute html =~ "bg-red-950"
+    end
+  end
+
+  describe "message/1 for MCP tool rows" do
+    test "badges the row with the server the call went to" do
+      item = EvaWeb.Sessions.Transcript.tool_started("c1", "mcp__github__create_issue", %{})
+
+      html = render_component(&ChatComponents.message/1, item: item)
+
+      assert html =~ "create_issue"
+      assert html =~ "MCP server: github"
+    end
+
+    test "shows the latest progress line while the call runs" do
+      item = EvaWeb.Sessions.Transcript.tool_started("c1", "mcp__x__y", %{}, "cloning repo")
+
+      assert render_component(&ChatComponents.message/1, item: item) =~ "cloning repo"
+    end
+
+    test "drops progress once the call finishes" do
+      finished =
+        EvaWeb.Sessions.Transcript.tool_finished(
+          "c1",
+          "mcp__x__y",
+          %{},
+          %{content: [%Eva.Agent.Messages.TextContent{text: "done"}]},
+          false
+        )
+
+      html = render_component(&ChatComponents.message/1, item: finished)
+
+      assert html =~ "done"
+      refute html =~ "cloning repo"
     end
   end
 end

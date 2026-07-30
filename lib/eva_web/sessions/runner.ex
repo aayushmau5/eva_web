@@ -7,6 +7,10 @@ defmodule EvaWeb.Sessions.Runner do
   long-lived, and rebroadcasts everything to `EvaWeb.Sessions.topic/1` so any number of LiveViews
   can attach and detach freely. It also answers `:snapshot`, which is how a view that attaches
   mid-conversation catches up.
+
+  MCP events arrive on the same channel and get the same treatment, but they are also folded into
+  `EvaWeb.Sessions.MCP` state here rather than in each view: an MCP server announces itself once,
+  and a LiveView that reconnects after that would otherwise never learn the server exists.
   """
 
   # :temporary because the usual reason a Runner dies is an unreadable transcript or an Eva-side
@@ -24,6 +28,7 @@ defmodule EvaWeb.Sessions.Runner do
   alias Eva.Coding.SessionIndexManager
   alias EvaWeb.Providers
   alias EvaWeb.Sessions
+  alias EvaWeb.Sessions.MCP
 
   # Eva's naming Task can finish after the agent run does; re-check once so the sidebar picks the
   # generated title up without a manual refresh.
@@ -40,7 +45,11 @@ defmodule EvaWeb.Sessions.Runner do
   @doc "Registry key for a session, whose value carries whether the agent is currently working."
   def via(session_id), do: {:via, Registry, {EvaWeb.SessionRegistry, session_id, false}}
 
-  @spec snapshot(GenServer.server()) :: %{messages: [struct()], running?: boolean()}
+  @spec snapshot(GenServer.server()) :: %{
+          messages: [struct()],
+          running?: boolean(),
+          mcp: MCP.t()
+        }
   def snapshot(server), do: GenServer.call(server, :snapshot)
 
   @spec prompt(GenServer.server(), String.t()) :: :ok | {:error, String.t()}
@@ -48,6 +57,19 @@ defmodule EvaWeb.Sessions.Runner do
 
   @spec cancel(GenServer.server()) :: :ok
   def cancel(server), do: GenServer.call(server, :cancel)
+
+  @doc """
+  Switches an MCP server on or off.
+
+  `:session` applies to this session only and is recorded in its transcript, so it survives a
+  resume. `:persist` writes `enabled` back to the `mcp.json` the server came from, which every
+  *new* session then picks up — sessions already open keep what they have.
+  """
+  @spec set_mcp_enabled(GenServer.server(), String.t(), boolean(), :session | :persist) ::
+          :ok | {:error, term()}
+  def set_mcp_enabled(server, name, enabled?, scope) do
+    GenServer.call(server, {:set_mcp_enabled, name, enabled?, scope})
+  end
 
   # -- GenServer --
 
@@ -84,14 +106,23 @@ defmodule EvaWeb.Sessions.Runner do
       session_id: session_id,
       session_pid: session_pid,
       running?: false,
-      titled?: not is_nil(entry.title)
+      titled?: not is_nil(entry.title),
+      # Read after the session has finished starting its clients, so a server that connects
+      # instantly is already `:connected` here rather than only via the event that we're too late
+      # to have received.
+      mcp: MCP.new(entry.cwd, CodingSession.list_mcp_servers(session_pid))
     }
   end
 
   @impl true
   def handle_call(:snapshot, _from, state) do
-    {:reply, %{messages: CodingSession.messages(state.session_pid), running?: state.running?},
-     state}
+    reply = %{
+      messages: CodingSession.messages(state.session_pid),
+      running?: state.running?,
+      mcp: state.mcp
+    }
+
+    {:reply, reply, state}
   end
 
   def handle_call({:prompt, text}, _from, state) do
@@ -116,6 +147,15 @@ defmodule EvaWeb.Sessions.Runner do
     {:reply, :ok, set_running(state, false)}
   end
 
+  # Eva answers with the new server list, so the refreshed state goes out from here rather than
+  # waiting on a client event — switching a server *off* produces no events at all.
+  def handle_call({:set_mcp_enabled, name, enabled?, scope}, _from, state) do
+    case CodingSession.set_mcp_enabled(state.session_pid, name, enabled?, scope) do
+      {:ok, infos} -> {:reply, :ok, publish_mcp(state, MCP.refresh(state.mcp, infos))}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
   # -- Agent events --
 
   @impl true
@@ -137,12 +177,28 @@ defmodule EvaWeb.Sessions.Runner do
     {:noreply, maybe_title_from(state, message)}
   end
 
-  def handle_info(%{__struct__: module} = event, state) when is_atom(module) do
-    if agent_event?(module) do
-      broadcast(state, event)
-    end
+  # -- MCP events --
 
-    {:noreply, state}
+  # Views get the derived state, not the event: Eva's session folds these into its own snapshots,
+  # so the server list is the answer and re-reading it is what keeps the two from disagreeing.
+  # The event still carries the wire-level detail Eva doesn't keep — see `MCP.apply_event/2`.
+  def handle_info(event, state) when is_struct(event) do
+    cond do
+      MCP.event?(event) ->
+        mcp =
+          state.mcp
+          |> MCP.apply_event(event)
+          |> MCP.refresh(CodingSession.list_mcp_servers(state.session_pid))
+
+        {:noreply, publish_mcp(state, mcp)}
+
+      agent_event?(event.__struct__) ->
+        broadcast(state, event)
+        {:noreply, state}
+
+      true ->
+        {:noreply, state}
+    end
   end
 
   # -- Housekeeping --
@@ -183,6 +239,11 @@ defmodule EvaWeb.Sessions.Runner do
 
   defp broadcast(state, event) do
     Phoenix.PubSub.broadcast(EvaWeb.PubSub, Sessions.topic(state.session_id), {:eva, event})
+  end
+
+  defp publish_mcp(state, mcp) do
+    Phoenix.PubSub.broadcast(EvaWeb.PubSub, Sessions.topic(state.session_id), {:mcp, mcp})
+    %{state | mcp: mcp}
   end
 
   defp agent_event?(module) do

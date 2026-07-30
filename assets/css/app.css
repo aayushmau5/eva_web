@@ -91,6 +91,17 @@
   --noise: 0;
 }
 
+/* Three steps below Tailwind's `text-xs`, for the badges, labels and tool output this UI is built
+   from. They were arbitrary values (`text-[10px]`) until font size became a setting: a utility that
+   compiles to a literal `10px` cannot be scaled, whereas one that reads `var(--text-3xs)` can — see
+   `EvaWebWeb.Layouts`. Line heights are left undefined on purpose, so these keep inheriting theirs
+   exactly as the literals did. */
+@theme {
+  --text-2xs: 0.6875rem;
+  --text-3xs: 0.625rem;
+  --text-4xs: 0.5625rem;
+}
+
 /* Add variants based on LiveView classes */
 @custom-variant phx-click-loading (.phx-click-loading&, .phx-click-loading &);
 @custom-variant phx-submit-loading (.phx-submit-loading&, .phx-submit-loading &);
@@ -111,6 +122,28 @@
   [role="button"]:not(:disabled) {
     cursor: pointer;
   }
+
+  /* The mono font is a user setting (`EvaWeb.Settings`), applied by overriding `--font-mono` on
+     the app wrapper. Preflight styles these elements through `--default-mono-font-family`, which
+     is declared on `:root` and therefore resolves there — above the override, so it never sees
+     it. Reading `--font-mono` at the element itself is what lets the setting through; unset, it
+     is still Tailwind's own default. */
+  code,
+  kbd,
+  samp,
+  pre {
+    font-family: var(--font-mono);
+  }
+}
+
+/* The height of a one-line composer, shared by the input and the send/stop button beside it.
+   The input's height is typographic — line height times font size, both of which move with the
+   user's font settings — while a button sized in fixed pixels does not. Bottom-aligned in the same
+   row, any difference shows up as the button sitting low against the input, so both read the
+   figure from here instead of restating it. */
+/* one text line, plus py-2 top and bottom, plus the 1px border on each edge */
+#composer {
+  --composer-row: calc(var(--text-sm) * var(--text-sm--line-height, 1.4286) + 1rem + 2px);
 }
 
 /* Rendered assistant markdown. Hand-written rather than @tailwindcss/typography, which is an npm
@@ -154,12 +187,14 @@
 }
 
 /* Wide code must scroll inside its own box so the message column never does. The background is
-   only a fallback: the syntax highlighter sets its own theme colour inline, which wins. */
+   only a fallback: the syntax highlighter sets its own theme colour inline, which wins. It is
+   gruvbox-dark's own, so a block that fails to highlight doesn't sit at a different shade than
+   the ones around it — see `@code_theme` in `EvaWebWeb.ChatComponents`. */
 .md pre {
   margin: 0.625rem 0;
   padding: 0.625rem 0.75rem;
   overflow-x: auto;
-  background: #111;
+  background: #282828;
   border: 1px solid var(--color-zinc-800);
 }
 .md pre code {

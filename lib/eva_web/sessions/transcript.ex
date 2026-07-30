@@ -10,6 +10,7 @@ defmodule EvaWeb.Sessions.Transcript do
   """
 
   alias Eva.Agent.Messages
+  alias EvaWeb.Sessions.MCP
 
   @type block :: {:text, String.t()} | {:thinking, String.t()}
   @type status :: :running | :ok | :error
@@ -20,10 +21,12 @@ defmodule EvaWeb.Sessions.Transcript do
           blocks: [block()],
           text: String.t(),
           name: String.t() | nil,
+          server: String.t() | nil,
           args: map() | nil,
           status: status() | nil,
           error: String.t() | nil,
-          patch: String.t() | nil
+          patch: String.t() | nil,
+          progress: String.t() | nil
         }
 
   @base %{
@@ -32,10 +35,12 @@ defmodule EvaWeb.Sessions.Transcript do
     blocks: [],
     text: "",
     name: nil,
+    server: nil,
     args: nil,
     status: nil,
     error: nil,
-    patch: nil
+    patch: nil,
+    progress: nil
   }
 
   @doc """
@@ -80,17 +85,24 @@ defmodule EvaWeb.Sessions.Transcript do
     %{@base | id: id, kind: :user, text: Messages.UserMessage.text(message)}
   end
 
-  @doc "A tool row that has started but not finished."
-  @spec tool_started(String.t(), String.t(), map()) :: item()
-  def tool_started(tool_call_id, tool_name, args) do
+  @doc """
+  A tool row that has started but not finished.
+
+  `progress` is the latest line an MCP server reported through `notifications/progress`. Each one
+  replaces the last rather than appending, because a progress notification describes where the call
+  is now, not what it has done so far.
+  """
+  @spec tool_started(String.t(), String.t(), map(), String.t() | nil) :: item()
+  def tool_started(tool_call_id, tool_name, args, progress \\ nil) do
     %{
       @base
       | id: tool_id(tool_call_id),
         kind: :tool,
-        name: tool_name,
         args: args,
-        status: :running
+        status: :running,
+        progress: progress
     }
+    |> put_tool_name(tool_name)
   end
 
   @doc "A finished tool row, from a `ToolExecutionEnd` event."
@@ -102,12 +114,12 @@ defmodule EvaWeb.Sessions.Transcript do
       @base
       | id: tool_id(tool_call_id),
         kind: :tool,
-        name: tool_name,
         args: args,
         status: if(is_error?, do: :error, else: :ok),
         text: Messages.content_text(result.content),
         patch: Map.get(details, :patch) || details["patch"]
     }
+    |> put_tool_name(tool_name)
   end
 
   @doc "A one-line summary of tool arguments for the collapsed row."
@@ -142,12 +154,12 @@ defmodule EvaWeb.Sessions.Transcript do
         @base
         | id: tool_id(message.tool_call_id),
           kind: :tool,
-          name: message.tool_name,
           args: Map.get(args, message.tool_call_id),
           status: if(message.is_error, do: :error, else: :ok),
           text: Messages.ToolResultMessage.text(message),
           patch: Map.get(details, :patch) || details["patch"]
       }
+      |> put_tool_name(message.tool_name)
     ]
   end
 
@@ -178,6 +190,16 @@ defmodule EvaWeb.Sessions.Transcript do
   end
 
   defp to_item(_message, _index, _args), do: []
+
+  # MCP tools reach the model as `mcp__<server>__<tool>`, which is what gets persisted. Splitting
+  # it here means a replayed row and a live one are attributed identically, with no lookup against
+  # a server that may not even be connected any more.
+  defp put_tool_name(item, tool_name) do
+    case MCP.source(tool_name) do
+      {server, tool} -> %{item | name: tool, server: server}
+      nil -> %{item | name: tool_name}
+    end
+  end
 
   defp tool_call_args(messages) do
     for %Messages.AssistantMessage{} = message <- messages,

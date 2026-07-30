@@ -103,6 +103,45 @@ defmodule EvaWeb.Sessions.TranscriptTest do
     end
   end
 
+  describe "MCP tool calls" do
+    test "splits the server off a replayed MCP tool row" do
+      messages = [
+        %Messages.ToolResultMessage{
+          tool_call_id: "call_1",
+          tool_name: "mcp__github__create_issue",
+          content: [text("done")]
+        }
+      ]
+
+      assert [%{name: "create_issue", server: "github"}] = Transcript.to_items(messages)
+    end
+
+    test "a live MCP row is attributed the same way as a replayed one" do
+      started = Transcript.tool_started("call_1", "mcp__github__create_issue", %{})
+
+      finished =
+        Transcript.tool_finished(
+          "call_1",
+          "mcp__github__create_issue",
+          %{},
+          %{content: [text("done")]},
+          false
+        )
+
+      assert %{name: "create_issue", server: "github"} = started
+      assert %{name: "create_issue", server: "github"} = finished
+    end
+
+    test "leaves a built-in tool unattributed" do
+      assert %{name: "read", server: nil} = Transcript.tool_started("call_1", "read", %{})
+    end
+
+    test "carries the latest progress line on a running row" do
+      assert %{status: :running, progress: "3/10"} =
+               Transcript.tool_started("call_1", "mcp__x__y", %{}, "3/10")
+    end
+  end
+
   describe "assistant_item/2" do
     test "renders a partial message under an existing id" do
       partial = %Messages.AssistantMessage{content: [text("strea")]}

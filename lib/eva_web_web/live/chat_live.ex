@@ -9,13 +9,18 @@ defmodule EvaWebWeb.ChatLive do
   """
   use EvaWebWeb, :live_view
 
+  require Logger
+
   import EvaWebWeb.ChatComponents
 
   alias Eva.Agent.Events
   alias Eva.Agent.Messages
+  alias EvaWeb.Fonts
   alias EvaWeb.Providers
   alias EvaWeb.Sessions
+  alias EvaWeb.Sessions.MCP
   alias EvaWeb.Sessions.Transcript
+  alias EvaWeb.Settings
 
   @impl true
   def mount(_params, _session, socket) do
@@ -38,7 +43,12 @@ defmodule EvaWebWeb.ChatLive do
        new_project: nil,
        queued_messages: [],
        last_model: nil,
-       last_provider: nil
+       last_provider: nil,
+       mcp: MCP.empty(),
+       show_mcp: false,
+       settings: Settings.get(),
+       show_settings: false,
+       fonts: :loading
      )
      |> assign_sessions()
      |> stream(:messages, [])}
@@ -197,6 +207,56 @@ defmodule EvaWebWeb.ChatLive do
      |> assign_sessions()}
   end
 
+  # -- Settings --
+
+  # Enumerating fonts shells out, so it happens off the LiveView process and only when the modal
+  # is actually opened. It is cached after the first read, so reopening is instant.
+  def handle_event("open_settings", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(show_settings: true, settings: Settings.get())
+     |> load_fonts(&Fonts.list/0)}
+  end
+
+  def handle_event("close_settings", _params, socket) do
+    {:noreply, assign(socket, :show_settings, false)}
+  end
+
+  def handle_event("rescan_fonts", _params, socket) do
+    {:noreply, load_fonts(socket, &Fonts.refresh/0)}
+  end
+
+  # The form change event carries every field each time, so only what actually moved is written —
+  # otherwise picking a UI font rewrites the settings file for the mono one too.
+  def handle_event("settings_change", params, socket) do
+    settings =
+      Enum.reduce([:ui_font, :mono_font, :font_scale], socket.assigns.settings, fn key, acc ->
+        picked = presence(params[Atom.to_string(key)])
+
+        if same?(picked, Map.fetch!(acc, key)), do: acc, else: Settings.put(key, picked)
+      end)
+
+    {:noreply, assign(socket, :settings, settings)}
+  end
+
+  def handle_event("toggle_mcp", _params, socket) do
+    {:noreply, assign(socket, :show_mcp, not socket.assigns.show_mcp)}
+  end
+
+  def handle_event("close_mcp", _params, socket) do
+    {:noreply, assign(socket, :show_mcp, false)}
+  end
+
+  # The runner publishes the new state to everyone on the session, this view included, so there is
+  # nothing to assign here beyond reporting a refusal.
+  def handle_event("mcp_set_enabled", %{"name" => name, "enabled" => enabled}, socket) do
+    {:noreply, set_mcp_enabled(socket, name, enabled == "true", :session)}
+  end
+
+  def handle_event("mcp_persist", %{"name" => name, "enabled" => enabled}, socket) do
+    {:noreply, set_mcp_enabled(socket, name, enabled == "true", :persist)}
+  end
+
   def handle_event("confirm_delete", %{"id" => session_id}, socket) do
     {:noreply, assign(socket, :pending_delete, Sessions.get(session_id))}
   end
@@ -299,6 +359,21 @@ defmodule EvaWebWeb.ChatLive do
      |> stream_insert(:messages, item)}
   end
 
+  # A running tool reporting where it has got to — MCP servers send these as progress
+  # notifications. The row is rebuilt rather than patched because streams are write-only, so the
+  # args come from the start event recorded above.
+  def handle_info({:eva, %Events.ToolExecutionUpdate{} = event}, socket) do
+    case progress_text(event.partial_result) do
+      nil ->
+        {:noreply, socket}
+
+      progress ->
+        args = Map.get(socket.assigns.tool_args, event.tool_call_id)
+        item = Transcript.tool_started(event.tool_call_id, event.tool_name, args, progress)
+        {:noreply, stream_insert(socket, :messages, item)}
+    end
+  end
+
   # ToolExecutionEnd carries no args, so they come from the start event recorded above.
   def handle_info({:eva, %Events.ToolExecutionEnd{} = event}, socket) do
     args = Map.get(socket.assigns.tool_args, event.tool_call_id)
@@ -317,6 +392,10 @@ defmodule EvaWebWeb.ChatLive do
 
   # Tool results arrive again as messages; the tool row above already shows them.
   def handle_info({:eva, _event}, socket), do: {:noreply, socket}
+
+  # The runner derives MCP state from Eva's own server list and publishes it whole, so there is
+  # nothing to fold here — and every view watching the session sees the same thing after a toggle.
+  def handle_info({:mcp, mcp}, socket), do: {:noreply, assign(socket, :mcp, mcp)}
 
   # -- Housekeeping --
 
@@ -339,6 +418,17 @@ defmodule EvaWebWeb.ChatLive do
   # -- Model lookup --
 
   @impl true
+  def handle_async(:fonts, {:ok, families}, socket) do
+    {:noreply, assign(socket, :fonts, families)}
+  end
+
+  # A machine with no fontconfig and a broken fallback would leave the picker permanently empty;
+  # showing the built-in list is better than a modal that never resolves.
+  def handle_async(:fonts, {:exit, reason}, socket) do
+    Logger.warning("ChatLive: font lookup failed: #{inspect(reason)}")
+    {:noreply, assign(socket, :fonts, %{ui: [], mono: []})}
+  end
+
   def handle_async(:provider_models, {:ok, {provider, result}}, socket) do
     {:noreply, apply_models(socket, provider, result)}
   end
@@ -359,7 +449,7 @@ defmodule EvaWebWeb.ChatLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash}>
+    <Layouts.app flash={@flash} settings={@settings}>
       <:sidebar>
         <.sidebar
           groups={@groups}
@@ -371,67 +461,82 @@ defmodule EvaWebWeb.ChatLive do
         />
       </:sidebar>
 
-      <header class="flex h-12 shrink-0 items-center gap-3 border-b border-zinc-800 px-4">
-        <%= if @session do %>
-          <span class="truncate text-sm font-medium text-zinc-200">
-            {@session.title || "Untitled session"}
-          </span>
-          <span class="truncate text-xs text-zinc-600" title={@session.cwd}>{@session.cwd}</span>
-          <span class="ml-auto flex shrink-0 items-center gap-1.5">
-            <span
-              :if={Providers.label(@session.provider_name)}
-              class="border border-zinc-800 px-2 py-0.5 text-[10px] text-zinc-600"
-            >
-              {Providers.label(@session.provider_name)}
-            </span>
-            <span class="border border-zinc-800 px-2 py-0.5 text-[10px] text-zinc-500">
-              {@session.model}
-            </span>
-          </span>
-        <% else %>
-          <span class="text-sm font-medium text-zinc-500">No session selected</span>
-        <% end %>
-      </header>
+      <div class="relative flex min-h-0 flex-1">
+        <div class="flex min-w-0 flex-1 flex-col">
+          <header class="flex h-12 shrink-0 items-center gap-3 border-b border-zinc-800 px-4">
+            <%= if @session do %>
+              <span class="truncate text-sm font-medium text-zinc-200">
+                {@session.title || "Untitled session"}
+              </span>
+              <span class="truncate text-xs text-zinc-600" title={@session.cwd}>{@session.cwd}</span>
+              <span class="ml-auto flex shrink-0 items-center gap-1.5">
+                <.mcp_indicator mcp={@mcp} open={@show_mcp} />
+                <span
+                  :if={Providers.label(@session.provider_name)}
+                  class="border border-zinc-800 px-2 py-0.5 text-3xs text-zinc-600"
+                >
+                  {Providers.label(@session.provider_name)}
+                </span>
+                <span class="border border-zinc-800 px-2 py-0.5 text-3xs text-zinc-500">
+                  {@session.model}
+                </span>
+              </span>
+            <% else %>
+              <span class="text-sm font-medium text-zinc-500">No session selected</span>
+            <% end %>
+          </header>
 
-      <div
-        :if={@session_id}
-        id="messages"
-        phx-update="stream"
-        phx-hook="ScrollToBottom"
-        class="flex-1 overflow-y-auto py-4"
-      >
-        <div :for={{dom_id, item} <- @streams.messages} id={dom_id}>
-          <.message item={item} />
-        </div>
-      </div>
-
-      <div :if={is_nil(@session_id)} class="flex flex-1 items-center justify-center px-4">
-        <div class="text-center">
-          <p class="text-sm text-zinc-500">Pick a session, or start a new one.</p>
-          <button
-            type="button"
-            phx-click="start_new_session"
-            class="mt-4 border border-zinc-700 px-4 py-2 text-sm text-zinc-300 transition-colors hover:border-zinc-500 hover:text-zinc-100"
+          <div
+            :if={@session_id}
+            id="messages"
+            phx-update="stream"
+            phx-hook="ScrollToBottom"
+            class="flex-1 overflow-y-auto py-4"
           >
-            New session
-          </button>
-        </div>
-      </div>
-
-      <div
-        :if={@queued_messages != []}
-        class="shrink-0 border-t border-zinc-800 bg-[#0c0c0c] px-4 py-2"
-      >
-        <div class="mx-auto flex max-w-3xl flex-col gap-1.5">
-          <div :for={msg <- @queued_messages} class="flex items-center gap-2 text-sm text-zinc-500">
-            <.icon name="hero-arrow-path-mini" class="size-3.5 shrink-0 animate-spin text-zinc-600" />
-            <span class="truncate">{msg}</span>
+            <div :for={{dom_id, item} <- @streams.messages} id={dom_id}>
+              <.message item={item} />
+            </div>
           </div>
+
+          <div :if={is_nil(@session_id)} class="flex flex-1 items-center justify-center px-4">
+            <div class="text-center">
+              <p class="text-sm text-zinc-500">Pick a session, or start a new one.</p>
+              <button
+                type="button"
+                phx-click="start_new_session"
+                class="mt-4 border border-zinc-700 px-4 py-2 text-sm text-zinc-300 transition-colors hover:border-zinc-500 hover:text-zinc-100"
+              >
+                New session
+              </button>
+            </div>
+          </div>
+
+          <div
+            :if={@queued_messages != []}
+            class="shrink-0 border-t border-zinc-800 bg-[#0c0c0c] px-4 py-2"
+          >
+            <div class="mx-auto flex max-w-3xl flex-col gap-1.5">
+              <div
+                :for={msg <- @queued_messages}
+                class="flex items-center gap-2 text-sm text-zinc-500"
+              >
+                <.icon
+                  name="hero-arrow-path-mini"
+                  class="size-3.5 shrink-0 animate-spin text-zinc-600"
+                />
+                <span class="truncate">{msg}</span>
+              </div>
+            </div>
+          </div>
+
+          <.composer running={@running?} disabled={is_nil(@session_id)} />
         </div>
+
+        <.mcp_panel mcp={@mcp} open={@show_mcp and not is_nil(@session_id)} />
       </div>
 
-      <.composer running={@running?} disabled={is_nil(@session_id)} />
       <.delete_modal session={@pending_delete} />
+      <.settings_modal open={@show_settings} settings={@settings} fonts={@fonts} />
     </Layouts.app>
     """
   end
@@ -442,7 +547,8 @@ defmodule EvaWebWeb.ChatLive do
     socket = close_session(socket)
 
     with {:ok, pid} <- Sessions.ensure_started(session_id),
-         {:ok, %{messages: messages, running?: running?}} <- Sessions.snapshot(session_id) do
+         {:ok, %{messages: messages, running?: running?, mcp: mcp}} <-
+           Sessions.snapshot(session_id) do
       Sessions.subscribe(session_id)
       items = Transcript.to_items(messages)
       session = Sessions.get(session_id)
@@ -456,7 +562,8 @@ defmodule EvaWebWeb.ChatLive do
         next_index: length(items),
         tool_args: tool_args(messages),
         monitor_ref: Process.monitor(pid),
-        page_title: session.title || "Eva"
+        page_title: session.title || "Eva",
+        mcp: mcp
       )
       |> assign_sessions()
       |> stream(:messages, items, reset: true)
@@ -486,7 +593,9 @@ defmodule EvaWebWeb.ChatLive do
       tool_args: %{},
       monitor_ref: nil,
       page_title: "Eva",
-      queued_messages: []
+      queued_messages: [],
+      mcp: MCP.empty(),
+      show_mcp: false
     )
     |> stream(:messages, [], reset: true)
   end
@@ -494,6 +603,38 @@ defmodule EvaWebWeb.ChatLive do
   defp assign_sessions(socket) do
     assign(socket, groups: Sessions.list_grouped(), running_ids: Sessions.running_ids())
   end
+
+  defp set_mcp_enabled(%{assigns: %{session_id: nil}} = socket, _name, _enabled?, _scope) do
+    socket
+  end
+
+  defp set_mcp_enabled(socket, name, enabled?, scope) do
+    case Sessions.set_mcp_enabled(socket.assigns.session_id, name, enabled?, scope) do
+      :ok ->
+        socket
+
+      {:error, reason} ->
+        put_flash(socket, :error, "Could not update #{name}: #{describe(reason)}")
+    end
+  end
+
+  defp load_fonts(socket, read) do
+    start_async(socket, :fonts, read)
+  end
+
+  # Every value arrives from the form as a string, including the font scale, which is stored as an
+  # integer — so "110" and 110 are the same choice and must not look like a change.
+  defp same?(picked, current) when is_integer(current), do: picked == to_string(current)
+  defp same?(picked, current), do: picked == current
+
+  defp presence(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp presence(_value), do: nil
 
   # A network call, so off the LiveView process. One async name means switching provider twice in a
   # row cancels the first lookup, and the provider rides along in the reply so a result that
@@ -526,6 +667,17 @@ defmodule EvaWebWeb.ChatLive do
   end
 
   defp choose_model({:error, _reason}, current), do: current
+
+  # Partial results carry the same content shape as a finished one; only the text is useful as a
+  # status line, and an empty one is not worth re-rendering the row for.
+  defp progress_text(%{content: content}) do
+    case content |> Messages.content_text() |> String.trim() do
+      "" -> nil
+      text -> text
+    end
+  end
+
+  defp progress_text(_partial_result), do: nil
 
   defp next_id(socket) do
     index = socket.assigns.next_index
