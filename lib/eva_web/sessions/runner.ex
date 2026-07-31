@@ -28,6 +28,7 @@ defmodule EvaWeb.Sessions.Runner do
   alias Eva.Coding.SessionIndexManager
   alias EvaWeb.Providers
   alias EvaWeb.Sessions
+  alias EvaWeb.Sessions.Ledger
   alias EvaWeb.Sessions.MCP
 
   # Eva's naming Task can finish after the agent run does; re-check once so the sidebar picks the
@@ -48,9 +49,21 @@ defmodule EvaWeb.Sessions.Runner do
   @spec snapshot(GenServer.server()) :: %{
           messages: [struct()],
           running?: boolean(),
-          mcp: MCP.t()
+          mcp: MCP.t(),
+          ledger: Ledger.t()
         }
   def snapshot(server), do: GenServer.call(server, :snapshot)
+
+  @doc """
+  Forks the session at `entry_id`, a user message in its transcript.
+
+  See `EvaWeb.Sessions.fork/2`. Everyone watching the source session is told about the new fork, so
+  the message it was taken from grows a link to it without a reload.
+  """
+  @spec fork(GenServer.server(), String.t()) ::
+          {:ok, %{session_id: String.t(), title: String.t(), prefill: String.t()}}
+          | {:error, term()}
+  def fork(server, entry_id), do: GenServer.call(server, {:fork, entry_id})
 
   @spec prompt(GenServer.server(), String.t()) :: :ok | {:error, String.t()}
   def prompt(server, text), do: GenServer.call(server, {:prompt, text})
@@ -113,6 +126,9 @@ defmodule EvaWeb.Sessions.Runner do
     %{
       session_id: session_id,
       session_pid: session_pid,
+      # Timestamps and forks live in the transcript rather than the index, so they are read back
+      # off the file itself — see `EvaWeb.Sessions.Ledger`.
+      session_path: entry.session_path,
       running?: false,
       titled?: not is_nil(entry.title),
       # Read after the session has finished starting its clients, so a server that connects
@@ -127,10 +143,22 @@ defmodule EvaWeb.Sessions.Runner do
     reply = %{
       messages: CodingSession.messages(state.session_pid),
       running?: state.running?,
-      mcp: state.mcp
+      mcp: state.mcp,
+      ledger: Ledger.read(state.session_path)
     }
 
     {:reply, reply, state}
+  end
+
+  def handle_call({:fork, entry_id}, _from, state) do
+    case CodingSession.fork(state.session_pid, entry_id) do
+      {:ok, session_id, title, prefill} ->
+        publish_ledger(state)
+        {:reply, {:ok, %{session_id: session_id, title: title, prefill: prefill}}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call({:prompt, text}, _from, state) do
@@ -186,8 +214,12 @@ defmodule EvaWeb.Sessions.Runner do
     {:noreply, set_running(state, false)}
   end
 
+  # A user message is only forkable once it has an entry to fork at, which is a moment after it is
+  # spoken. Eva writes the entry before it forwards this event, so re-reading here is safe, and it
+  # is the one point at which the set of fork points can grow.
   def handle_info(%Events.MessageEnd{message: %Messages.UserMessage{} = message} = event, state) do
     broadcast(state, event)
+    publish_ledger(state)
     {:noreply, maybe_title_from(state, message)}
   end
 
@@ -258,6 +290,13 @@ defmodule EvaWeb.Sessions.Runner do
   defp publish_mcp(state, mcp) do
     Phoenix.PubSub.broadcast(EvaWeb.PubSub, Sessions.topic(state.session_id), {:mcp, mcp})
     %{state | mcp: mcp}
+  end
+
+  # Read fresh rather than held in state: fork titles come from the session index, which anything
+  # renaming or deleting a fork changes behind this process's back.
+  defp publish_ledger(state) do
+    ledger = Ledger.read(state.session_path)
+    Phoenix.PubSub.broadcast(EvaWeb.PubSub, Sessions.topic(state.session_id), {:ledger, ledger})
   end
 
   defp agent_event?(module) do

@@ -18,6 +18,7 @@ defmodule EvaWebWeb.ChatLive do
   alias EvaWeb.Fonts
   alias EvaWeb.Providers
   alias EvaWeb.Sessions
+  alias EvaWeb.Sessions.Ledger
   alias EvaWeb.Sessions.MCP
   alias EvaWeb.Sessions.Transcript
   alias EvaWeb.Settings
@@ -34,6 +35,7 @@ defmodule EvaWebWeb.ChatLive do
        session_id: nil,
        running?: false,
        current_id: nil,
+       current_at: nil,
        next_index: 0,
        tool_args: %{},
        monitor_ref: nil,
@@ -48,6 +50,8 @@ defmodule EvaWebWeb.ChatLive do
        show_mcp: false,
        renaming: false,
        rename_form: nil,
+       user_rows: [],
+       prefill: nil,
        settings: Settings.get(),
        show_settings: false,
        fonts: :loading
@@ -200,12 +204,28 @@ defmodule EvaWebWeb.ChatLive do
     end
   end
 
+  # Forking leaves this session untouched and opens the new one, because that is where the work
+  # continues — the fork it just gained is linked from the message on the way back.
+  def handle_event("fork", %{"entry" => entry_id}, socket) do
+    case Sessions.fork(socket.assigns.session_id, entry_id) do
+      {:ok, %{session_id: forked_id, prefill: prefill}} ->
+        {:noreply,
+         socket
+         |> assign(:prefill, {forked_id, prefill})
+         |> assign_sessions()
+         |> push_patch(to: ~p"/sessions/#{forked_id}")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Could not fork: #{describe(reason)}")}
+    end
+  end
+
   def handle_event("cancel", _params, socket) do
     if socket.assigns.session_id, do: Sessions.cancel(socket.assigns.session_id)
 
     {:noreply,
      socket
-     |> assign(queued_messages: [], running?: false, current_id: nil)
+     |> assign(queued_messages: [], running?: false, current_id: nil, current_at: nil)
      |> assign_sessions()}
   end
 
@@ -323,7 +343,7 @@ defmodule EvaWebWeb.ChatLive do
   def handle_info({:eva, %Events.AgentEnd{}}, socket) do
     {:noreply,
      socket
-     |> assign(running?: false, current_id: nil)
+     |> assign(running?: false, current_id: nil, current_at: nil)
      |> assign(:session, Sessions.get(socket.assigns.session_id))}
   end
 
@@ -339,7 +359,14 @@ defmodule EvaWebWeb.ChatLive do
         [_ | rest] -> assign(socket, :queued_messages, rest)
       end
 
-    {:noreply, stream_insert(socket, :messages, Transcript.user_item(id, message))}
+    # Tracked in order alongside the stream: this is the row a fork handle lands on once Eva has
+    # written the message and the runner says which entry it became.
+    item = Transcript.user_item(id, message, Transcript.now())
+
+    {:noreply,
+     socket
+     |> assign(:user_rows, socket.assigns.user_rows ++ [item])
+     |> stream_insert(:messages, item)}
   end
 
   def handle_info(
@@ -347,11 +374,14 @@ defmodule EvaWebWeb.ChatLive do
         socket
       ) do
     {id, socket} = next_id(socket)
+    # Stamped once, when the reply starts, and carried through every delta after it: a row that
+    # re-dated itself on each token would count up while the reader watched.
+    at = Transcript.now()
 
     {:noreply,
      socket
-     |> assign(:current_id, id)
-     |> stream_insert(:messages, Transcript.assistant_item(id, message))}
+     |> assign(current_id: id, current_at: at)
+     |> stream_insert(:messages, Transcript.assistant_item(id, message, at))}
   end
 
   def handle_info({:eva, %Events.MessageUpdate{assistant_message_event: event}}, socket) do
@@ -359,7 +389,8 @@ defmodule EvaWebWeb.ChatLive do
     # re-rendered from `partial` rather than by accumulating deltas here.
     case {socket.assigns.current_id, Map.get(event, :partial)} do
       {id, %Messages.AssistantMessage{} = partial} when is_binary(id) ->
-        {:noreply, stream_insert(socket, :messages, Transcript.assistant_item(id, partial))}
+        item = Transcript.assistant_item(id, partial, socket.assigns.current_at)
+        {:noreply, stream_insert(socket, :messages, item)}
 
       _other ->
         {:noreply, socket}
@@ -371,17 +402,18 @@ defmodule EvaWebWeb.ChatLive do
         socket
       ) do
     id = socket.assigns.current_id
+    at = socket.assigns.current_at
 
     socket =
       socket
       |> remember_tool_args(message)
       |> then(fn socket ->
         if id,
-          do: stream_insert(socket, :messages, Transcript.assistant_item(id, message)),
+          do: stream_insert(socket, :messages, Transcript.assistant_item(id, message, at)),
           else: socket
       end)
 
-    {:noreply, assign(socket, :current_id, nil)}
+    {:noreply, assign(socket, current_id: nil, current_at: nil)}
   end
 
   def handle_info({:eva, %Events.ToolExecutionStart{} = event}, socket) do
@@ -431,6 +463,10 @@ defmodule EvaWebWeb.ChatLive do
   # nothing to fold here — and every view watching the session sees the same thing after a toggle.
   def handle_info({:mcp, mcp}, socket), do: {:noreply, assign(socket, :mcp, mcp)}
 
+  # Fork state is derived from the transcript on disk, so it lands a beat behind the message it
+  # belongs to, and again whenever a fork is taken from this session in any window.
+  def handle_info({:ledger, ledger}, socket), do: {:noreply, apply_forks(socket, ledger)}
+
   # -- Housekeeping --
 
   def handle_info(:sessions_changed, socket) do
@@ -443,7 +479,7 @@ defmodule EvaWebWeb.ChatLive do
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{assigns: %{monitor_ref: ref}} = socket) do
     {:noreply,
      socket
-     |> assign(running?: false, current_id: nil, monitor_ref: nil)
+     |> assign(running?: false, current_id: nil, current_at: nil, monitor_ref: nil)
      |> put_flash(:error, "Session stopped: #{inspect(reason)}")}
   end
 
@@ -623,10 +659,11 @@ defmodule EvaWebWeb.ChatLive do
     socket = close_session(socket)
 
     with {:ok, pid} <- Sessions.ensure_started(session_id),
-         {:ok, %{messages: messages, running?: running?, mcp: mcp}} <-
+         {:ok, %{messages: messages, running?: running?, mcp: mcp, ledger: ledger}} <-
            Sessions.snapshot(session_id) do
       Sessions.subscribe(session_id)
-      items = Transcript.to_items(messages)
+      items = Transcript.to_items(messages, ledger)
+      user_rows = Enum.filter(items, &(&1.kind == :user))
       session = Sessions.get(session_id)
 
       socket
@@ -635,14 +672,17 @@ defmodule EvaWebWeb.ChatLive do
         session_id: session_id,
         running?: running?,
         current_id: nil,
+        current_at: nil,
         next_index: length(items),
         tool_args: tool_args(messages),
         monitor_ref: Process.monitor(pid),
         page_title: session.title || "Eva",
-        mcp: mcp
+        mcp: mcp,
+        user_rows: user_rows
       )
       |> assign_sessions()
       |> stream(:messages, items, reset: true)
+      |> maybe_prefill(session_id)
     else
       {:error, reason} ->
         socket
@@ -665,6 +705,7 @@ defmodule EvaWebWeb.ChatLive do
       session_id: nil,
       running?: false,
       current_id: nil,
+      current_at: nil,
       next_index: 0,
       tool_args: %{},
       monitor_ref: nil,
@@ -673,9 +714,55 @@ defmodule EvaWebWeb.ChatLive do
       renaming: false,
       rename_form: nil,
       mcp: MCP.empty(),
-      show_mcp: false
+      show_mcp: false,
+      user_rows: []
     )
     |> stream(:messages, [], reset: true)
+  end
+
+  # -- Forks --
+
+  # The nth user bubble on screen is the nth user message in the transcript, so fork state is
+  # matched to rows by position: the ids the stream runs on are this view's own and mean nothing to
+  # Eva. Rows past the end of the ledger are messages Eva hasn't stored yet — they get their fork
+  # handle when the transcript catches up.
+  defp with_forks(user_rows, ledger) do
+    fork_points = Ledger.fork_points(ledger)
+
+    user_rows
+    |> Enum.with_index()
+    |> Enum.map(fn {row, index} ->
+      entry_id = Enum.at(fork_points, index)
+      %{row | entry_id: entry_id, forks: Ledger.forks_at(ledger, entry_id)}
+    end)
+  end
+
+  # Streams render what they are handed and nothing else, so a row whose forks changed has to go
+  # back in. Untouched rows are left alone rather than re-sent as a block: re-inserting the whole
+  # transcript on every message would undo the reader's scroll position and collapse open tools.
+  defp apply_forks(socket, ledger) do
+    updated = with_forks(socket.assigns.user_rows, ledger)
+
+    socket.assigns.user_rows
+    |> Enum.zip(updated)
+    |> Enum.reduce(assign(socket, :user_rows, updated), fn
+      {same, same}, socket -> socket
+      {_before, row}, socket -> stream_insert(socket, :messages, row)
+    end)
+  end
+
+  # The message a fork was taken at is handed back rather than replayed: the new session stops just
+  # short of it, so it belongs in the composer where the user can rework it before sending.
+  defp maybe_prefill(socket, session_id) do
+    case socket.assigns.prefill do
+      {^session_id, text} ->
+        socket
+        |> assign(:prefill, nil)
+        |> push_event("chat:fill", %{text: text})
+
+      _other ->
+        socket
+    end
   end
 
   defp assign_sessions(socket) do

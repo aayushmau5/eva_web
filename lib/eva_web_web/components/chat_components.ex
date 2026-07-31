@@ -808,27 +808,79 @@ defmodule EvaWebWeb.ChatComponents do
   defp ngettext_tool(1), do: "tool"
   defp ngettext_tool(_count), do: "tools"
 
+  defp ngettext_fork(1), do: "fork"
+  defp ngettext_fork(_count), do: "forks"
+
+  defp said_something?(%{blocks: blocks}), do: Enum.any?(blocks, &match?({:text, _text}, &1))
+
+  @doc """
+  The fork glyph, drawn as GitHub draws it.
+
+  Not a heroicon: the set has nothing that reads as a branch, and this is the shape anyone who has
+  used a repository already knows means "fork".
+  """
+  attr :class, :string, default: "size-4"
+
+  def fork_icon(assigns) do
+    ~H"""
+    <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" class={@class}>
+      <path d="M5 5.372v.878c0 .414.336.75.75.75h4.5a.75.75 0 0 0 .75-.75v-.878a2.25 2.25 0 1 1 1.5 0v.878a2.25 2.25 0 0 1-2.25 2.25h-1.5v2.128a2.251 2.251 0 1 1-1.5 0V8.5h-1.5A2.25 2.25 0 0 1 3.5 6.25v-.878a2.25 2.25 0 1 1 1.5 0ZM5 3.25a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Zm6.75.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm-3 8.75a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Z" />
+    </svg>
+    """
+  end
+
   @doc "One transcript row. Dispatches on the item kind produced by `Transcript`."
   attr :item, :map, required: true
 
   def message(%{item: %{kind: :user}} = assigns) do
     ~H"""
-    <div class="flex justify-end px-4 py-2">
+    <div class="group flex flex-col items-end gap-1 px-4 py-2">
       <%!-- phx-no-format keeps the text flush against the tags. Without it the formatter re-indents
            and whitespace-pre-wrap renders the template's own newlines as blank lines inside the
            bubble, plus a left offset from the indentation. --%>
       <div
+        id={"#{@item.id}-body"}
         phx-no-format
         class="max-w-[85%] whitespace-pre-wrap break-words border border-zinc-700 bg-[#1c1c1c] px-3 py-2 text-sm text-zinc-100"
       >{@item.text}</div>
+
+      <div class="flex max-w-[85%] flex-wrap items-center justify-end gap-1.5">
+        <.message_time at={@item.at} />
+        <span :if={@item.forks != []} class="text-3xs uppercase tracking-wider text-zinc-600">
+          {length(@item.forks)} {ngettext_fork(length(@item.forks))}
+        </span>
+        <.link
+          :for={fork <- @item.forks}
+          patch={~p"/sessions/#{fork.session_id}"}
+          title={"Open #{fork.title}"}
+          class="flex max-w-[16rem] items-center gap-1 border border-zinc-800 px-1.5 py-0.5 text-2xs text-zinc-500 transition-colors hover:border-zinc-600 hover:text-zinc-200"
+        >
+          <.fork_icon class="size-3 shrink-0 text-zinc-600" />
+          <span class="truncate">{fork.title}</span>
+        </.link>
+        <.copy_button item={@item} />
+        <%!-- Last, so it stays under the corner of the bubble however many forks sit beside it.
+              Only offered once the message has an entry to fork at, which is a beat after it is
+              sent. --%>
+        <button
+          :if={@item.entry_id}
+          type="button"
+          phx-click="fork"
+          phx-value-entry={@item.entry_id}
+          title="Fork the conversation from this message"
+          class="shrink-0 text-zinc-700 opacity-0 transition-all hover:text-zinc-300 focus:opacity-100 group-hover:opacity-100"
+        >
+          <.fork_icon class="size-3.5" />
+        </button>
+      </div>
     </div>
     """
   end
 
   def message(%{item: %{kind: :assistant}} = assigns) do
     ~H"""
-    <div class="px-4 py-2">
-      <div class="max-w-[85%] space-y-2">
+    <div class="group px-4 py-2">
+      <div id={"#{@item.id}-body"} class="max-w-[85%] space-y-2">
         <%= for {block, index} <- Enum.with_index(@item.blocks) do %>
           <%= case block do %>
             <% {:thinking, thinking} -> %>
@@ -846,7 +898,9 @@ defmodule EvaWebWeb.ChatComponents do
                 >{thinking}</div>
               </details>
             <% {:text, text} -> %>
-              <div class="md break-words text-sm text-zinc-200">{markdown(text)}</div>
+              <%!-- data-copy-part is what the copy button collects: the prose, without the
+                    thinking blocks wrapped around it. --%>
+              <div data-copy-part class="md break-words text-sm text-zinc-200">{markdown(text)}</div>
           <% end %>
         <% end %>
 
@@ -862,6 +916,12 @@ defmodule EvaWebWeb.ChatComponents do
         >
           {@item.error}
         </p>
+      </div>
+
+      <%!-- A row that has only thought so far has nothing to copy and isn't finished being said. --%>
+      <div :if={said_something?(@item)} class="mt-1 flex max-w-[85%] items-center gap-1.5">
+        <.message_time at={@item.at} />
+        <.copy_button item={@item} />
       </div>
     </div>
     """
@@ -903,6 +963,53 @@ defmodule EvaWebWeb.ChatComponents do
   def message(%{item: %{kind: :note}} = assigns) do
     ~H"""
     <div class="px-4 py-2 text-center text-xs italic text-zinc-600">{@item.text}</div>
+    """
+  end
+
+  @doc """
+  When a row was written, in the clock of whoever is reading it.
+
+  Eva's timestamps are unix seconds and the app runs on the same machine as the person using it, so
+  the OS timezone is the right one — and it needs no timezone database to get there.
+  """
+  attr :at, :float, default: nil
+
+  def message_time(assigns) do
+    ~H"""
+    <time :if={@at} datetime={iso_time(@at)} title={long_time(@at)} class="text-3xs text-zinc-700">
+      {short_time(@at)}
+    </time>
+    """
+  end
+
+  @doc """
+  Copies a message.
+
+  The text is read back out of the DOM rather than sent down with the button: an assistant message
+  is already on the page in full, and repeating it in an attribute would double what every streamed
+  delta puts on the wire.
+  """
+  attr :item, :map, required: true
+
+  def copy_button(assigns) do
+    ~H"""
+    <button
+      type="button"
+      id={"#{@item.id}-copy"}
+      phx-hook="Copy"
+      data-copy-from={"#{@item.id}-body"}
+      title="Copy message"
+      class="flex size-3.5 shrink-0 items-center justify-center text-zinc-700 opacity-0 transition-all hover:text-zinc-300 focus:opacity-100 group-hover:opacity-100"
+    >
+      <%!-- Both states are laid out identically and the box is sized on the button itself, so
+            swapping one for the other can't nudge the row it sits in. --%>
+      <span data-icon="idle" class="flex">
+        <.icon name="hero-square-2-stack-mini" class="size-3.5" />
+      </span>
+      <span data-icon="done" class="hidden">
+        <.icon name="hero-check-mini" class="size-3.5 text-emerald-500" />
+      </span>
+    </button>
     """
   end
 
@@ -1032,6 +1139,56 @@ defmodule EvaWebWeb.ChatComponents do
       {:error, _reason} -> text
     end
   end
+
+  @months ~w(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec)
+
+  @doc """
+  Clock time for a transcript row: bare on the day it happened, dated before that.
+
+  A conversation is read as a sequence of turns, so the useful part is the time of day; the date
+  only earns its space once the reader has to place a row on another day.
+  """
+  @spec short_time(number()) :: String.t()
+  def short_time(at) do
+    {{year, month, day}, {hour, minute, _second}} = local(at)
+    {today, _now} = :calendar.local_time()
+    clock = "#{hour12(hour)}:#{pad(minute)} #{meridiem(hour)}"
+
+    if {year, month, day} == today do
+      clock
+    else
+      "#{Enum.at(@months, month - 1)} #{day}, #{clock}"
+    end
+  end
+
+  @doc "The whole of a row's timestamp, for the tooltip the short form hides it behind."
+  @spec long_time(number()) :: String.t()
+  def long_time(at) do
+    {{year, month, day}, {hour, minute, second}} = local(at)
+    clock = "#{hour12(hour)}:#{pad(minute)}:#{pad(second)} #{meridiem(hour)}"
+
+    "#{day} #{Enum.at(@months, month - 1)} #{year}, #{clock}"
+  end
+
+  @doc "A row's timestamp as UTC ISO 8601, for the `datetime` attribute machines read."
+  @spec iso_time(number()) :: String.t()
+  def iso_time(at) do
+    at |> trunc() |> DateTime.from_unix!() |> DateTime.to_iso8601()
+  end
+
+  # The OS timezone, which on a tool that runs beside the person using it is the right one — and
+  # unlike `DateTime.shift_zone/2` it needs no timezone database to be configured.
+  defp local(at), do: :calendar.system_time_to_local_time(trunc(at * 1000), :millisecond)
+
+  defp pad(number), do: number |> Integer.to_string() |> String.pad_leading(2, "0")
+
+  # Midnight and noon are the 12s, not the 0s.
+  defp hour12(0), do: 12
+  defp hour12(hour) when hour > 12, do: hour - 12
+  defp hour12(hour), do: hour
+
+  defp meridiem(hour) when hour < 12, do: "am"
+  defp meridiem(_hour), do: "pm"
 
   @doc "Coarse relative time from Eva's float unix-seconds timestamps."
   def relative_time(nil), do: ""

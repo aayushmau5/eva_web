@@ -295,4 +295,132 @@ defmodule EvaWebWeb.ChatComponentsTest do
       refute html =~ "cloning repo"
     end
   end
+
+  describe "message/1 for user rows" do
+    defp user_item(attrs \\ %{}) do
+      "m0"
+      |> EvaWeb.Sessions.Transcript.user_item(%Eva.Agent.Messages.UserMessage{content: "hello"})
+      |> Map.merge(attrs)
+    end
+
+    test "offers no fork control until the message has an entry to fork at" do
+      html = render_component(&ChatComponents.message/1, item: user_item())
+
+      refute html =~ ~s(phx-click="fork")
+    end
+
+    test "forks at the entry the message was stored as" do
+      html = render_component(&ChatComponents.message/1, item: user_item(%{entry_id: "e1"}))
+
+      assert html =~ ~s(phx-click="fork")
+      assert html =~ ~s(phx-value-entry="e1")
+    end
+
+    test "counts the forks taken from the message and links to each" do
+      item =
+        user_item(%{
+          entry_id: "e1",
+          forks: [
+            %{session_id: "s1", title: "a better idea"},
+            %{session_id: "s2", title: "another angle"}
+          ]
+        })
+
+      html = render_component(&ChatComponents.message/1, item: item)
+
+      assert html =~ "2 forks"
+      assert html =~ ~s(href="/sessions/s1")
+      assert html =~ "a better idea"
+      assert html =~ ~s(href="/sessions/s2")
+      assert html =~ "another angle"
+    end
+
+    test "counts a single fork in the singular" do
+      item = user_item(%{entry_id: "e1", forks: [%{session_id: "s1", title: "a better idea"}]})
+
+      assert render_component(&ChatComponents.message/1, item: item) =~ "1 fork"
+    end
+
+    test "offers to copy the bubble" do
+      html = render_component(&ChatComponents.message/1, item: user_item())
+
+      assert html =~ ~s(phx-hook="Copy")
+      assert html =~ ~s(data-copy-from="m0-body")
+      assert html =~ ~s(id="m0-body")
+    end
+
+    test "shows when the message was sent" do
+      item = user_item(%{at: 1_785_176_488.134})
+
+      html = render_component(&ChatComponents.message/1, item: item)
+
+      assert html =~ ChatComponents.short_time(1_785_176_488.134)
+      assert html =~ ~s(datetime="2026-07-27T18:21:28Z")
+    end
+
+    test "leaves the time out of a row that has not been stored yet" do
+      refute render_component(&ChatComponents.message/1, item: user_item()) =~ "<time"
+    end
+  end
+
+  describe "message/1 for assistant rows" do
+    defp assistant_item(attrs \\ %{}) do
+      message = %Eva.Agent.Messages.AssistantMessage{
+        content: [%Eva.Agent.Messages.TextContent{text: "the answer"}]
+      }
+
+      "m1"
+      |> EvaWeb.Sessions.Transcript.assistant_item(message)
+      |> Map.merge(attrs)
+    end
+
+    test "offers to copy the prose, and marks which part of the row that is" do
+      html = render_component(&ChatComponents.message/1, item: assistant_item())
+
+      assert html =~ ~s(data-copy-from="m1-body")
+      assert html =~ "data-copy-part"
+    end
+
+    test "shows when the reply came in" do
+      html =
+        render_component(&ChatComponents.message/1,
+          item: assistant_item(%{at: 1_785_176_488.134})
+        )
+
+      assert html =~ ChatComponents.short_time(1_785_176_488.134)
+    end
+
+    # An empty row is the typing indicator; there is nothing to copy or date yet.
+    test "leaves a row that has said nothing yet bare" do
+      html = render_component(&ChatComponents.message/1, item: assistant_item(%{blocks: []}))
+
+      refute html =~ ~s(phx-hook="Copy")
+    end
+
+    test "leaves a row that has only thought so far bare" do
+      item = assistant_item(%{blocks: [{:thinking, "hmm"}]})
+
+      refute render_component(&ChatComponents.message/1, item: item) =~ ~s(phx-hook="Copy")
+    end
+  end
+
+  describe "short_time/1 and long_time/1" do
+    test "gives the clock time on the day it happened" do
+      {date, {hour, minute, _second}} = :calendar.local_time()
+      at = :calendar.local_time_to_universal_time_dst({date, {hour, minute, 0}}) |> hd()
+      seconds = :calendar.datetime_to_gregorian_seconds(at) - 62_167_219_200
+
+      assert ChatComponents.short_time(seconds) =~ ~r/^\d{1,2}:\d{2} [ap]m$/
+    end
+
+    test "dates a row from another day" do
+      assert ChatComponents.short_time(1_785_176_488.134) =~
+               ~r/^[A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2} [ap]m$/
+    end
+
+    test "spells the whole timestamp out for the tooltip" do
+      assert ChatComponents.long_time(1_785_176_488.134) =~
+               ~r/^\d{1,2} [A-Z][a-z]{2} 2026, \d{1,2}:\d{2}:\d{2} [ap]m$/
+    end
+  end
 end

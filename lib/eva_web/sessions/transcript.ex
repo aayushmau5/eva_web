@@ -10,6 +10,7 @@ defmodule EvaWeb.Sessions.Transcript do
   """
 
   alias Eva.Agent.Messages
+  alias EvaWeb.Sessions.Ledger
   alias EvaWeb.Sessions.MCP
 
   @type block :: {:text, String.t()} | {:thinking, String.t()}
@@ -26,9 +27,15 @@ defmodule EvaWeb.Sessions.Transcript do
           status: status() | nil,
           error: String.t() | nil,
           patch: String.t() | nil,
-          progress: String.t() | nil
+          progress: String.t() | nil,
+          at: float() | nil,
+          entry_id: String.t() | nil,
+          forks: [Ledger.fork()]
         }
 
+  # `at`, `entry_id` and `forks` come from `EvaWeb.Sessions.Ledger` rather than from the message: a
+  # message says nothing about the entry it was stored as, and its own timestamp is a compile-time
+  # default. Rows with nothing to fork at, or that Eva has yet to store, keep the defaults.
   @base %{
     id: nil,
     kind: :note,
@@ -40,7 +47,10 @@ defmodule EvaWeb.Sessions.Transcript do
     status: nil,
     error: nil,
     patch: nil,
-    progress: nil
+    progress: nil,
+    at: nil,
+    entry_id: nil,
+    forks: []
   }
 
   @doc """
@@ -48,15 +58,26 @@ defmodule EvaWeb.Sessions.Transcript do
 
   Tool arguments live on the assistant's `ToolCall` blocks while results live on later
   `ToolResultMessage`s, so arguments are collected in a first pass and joined onto the tool rows.
+
+  `ledger` supplies what the messages themselves can't say — when each was written, and what has
+  been forked from it. Rows it doesn't reach simply go without.
   """
-  @spec to_items([struct()]) :: [item()]
-  def to_items(messages) do
+  @spec to_items([struct()], Ledger.t()) :: [item()]
+  def to_items(messages, ledger \\ Ledger.empty()) do
     args_by_call_id = tool_call_args(messages)
 
     messages
     |> Enum.with_index()
-    |> Enum.flat_map(fn {message, index} -> to_item(message, index, args_by_call_id) end)
+    |> Enum.flat_map(fn {message, index} ->
+      message
+      |> to_item(index, args_by_call_id)
+      |> Enum.map(&from_ledger(&1, ledger, index))
+    end)
   end
+
+  @doc "Now, in the float unix-seconds Eva stamps its entries with."
+  @spec now() :: float()
+  def now, do: System.os_time(:millisecond) / 1000
 
   @doc "Id for the nth message row. Tool rows use `tool_id/1` instead."
   @spec message_id(non_neg_integer()) :: String.t()
@@ -66,23 +87,29 @@ defmodule EvaWeb.Sessions.Transcript do
   @spec tool_id(String.t()) :: String.t()
   def tool_id(tool_call_id), do: "t#{tool_call_id}"
 
-  @doc "Renders an assistant message — partial or final — into an item under an existing id."
-  @spec assistant_item(String.t(), Messages.AssistantMessage.t()) :: item()
-  def assistant_item(id, %Messages.AssistantMessage{} = message) do
+  @doc """
+  Renders an assistant message — partial or final — into an item under an existing id.
+
+  `at` is carried by the caller across a message's updates: a row is stamped when it starts, and
+  every delta after that rebuilds it whole.
+  """
+  @spec assistant_item(String.t(), Messages.AssistantMessage.t(), float() | nil) :: item()
+  def assistant_item(id, %Messages.AssistantMessage{} = message, at \\ nil) do
     %{
       @base
       | id: id,
         kind: :assistant,
         blocks: blocks(message.content),
         text: Messages.AssistantMessage.text(message),
-        error: error_message(message)
+        error: error_message(message),
+        at: at
     }
   end
 
   @doc "Renders a user message into an item under an existing id."
-  @spec user_item(String.t(), Messages.UserMessage.t()) :: item()
-  def user_item(id, %Messages.UserMessage{} = message) do
-    %{@base | id: id, kind: :user, text: Messages.UserMessage.text(message)}
+  @spec user_item(String.t(), Messages.UserMessage.t(), float() | nil) :: item()
+  def user_item(id, %Messages.UserMessage{} = message, at \\ nil) do
+    %{@base | id: id, kind: :user, text: Messages.UserMessage.text(message), at: at}
   end
 
   @doc """
@@ -133,6 +160,21 @@ defmodule EvaWeb.Sessions.Transcript do
   end
 
   # -- Private --
+
+  # Forks only ever hang off user messages, so only those rows carry the entry to fork at — every
+  # other row would show a control Eva would refuse.
+  defp from_ledger(item, ledger, index) do
+    case Ledger.row(ledger, index) do
+      nil ->
+        item
+
+      %{fork_point: fork_point} = row when item.kind == :user ->
+        %{item | at: row.at, entry_id: fork_point, forks: Ledger.forks_at(ledger, fork_point)}
+
+      row ->
+        %{item | at: row.at}
+    end
+  end
 
   defp to_item(%Messages.UserMessage{} = message, index, _args) do
     [user_item(message_id(index), message)]

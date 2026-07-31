@@ -59,6 +59,19 @@ defmodule EvaWeb.Sessions do
   def get(session_id), do: SessionIndexManager.get_session(manager(), session_id)
 
   @doc """
+  Every known session keyed by id.
+
+  `get/1` reads every project index to answer for one session, so anything resolving a handful of
+  ids at once — the forks hanging off a transcript, say — should read the lot once instead.
+  """
+  @spec index_by_id() :: %{String.t() => SessionIndexEntry.t()}
+  def index_by_id do
+    manager()
+    |> SessionIndexManager.list_sessions(nil)
+    |> Map.new(&{&1.id, &1})
+  end
+
+  @doc """
   Creates an empty session for `cwd` and returns its id.
 
   The index entry is written up front so the session shows in the sidebar before its first
@@ -188,10 +201,41 @@ defmodule EvaWeb.Sessions do
   being asked — an unreadable transcript shouldn't take a LiveView down with it.
   """
   @spec snapshot(String.t()) ::
-          {:ok, %{messages: [struct()], running?: boolean(), mcp: EvaWeb.Sessions.MCP.t()}}
+          {:ok,
+           %{
+             messages: [struct()],
+             running?: boolean(),
+             mcp: EvaWeb.Sessions.MCP.t(),
+             ledger: EvaWeb.Sessions.Ledger.t()
+           }}
           | {:error, term()}
   def snapshot(session_id) do
     {:ok, Runner.snapshot(via(session_id))}
+  catch
+    :exit, reason -> {:error, reason}
+  end
+
+  @doc """
+  Forks a session at one of its user messages.
+
+  Everything before that message is copied into a new session, and the message itself comes back as
+  `:prefill` rather than being sent: forking is for taking the same conversation somewhere else, so
+  the prompt lands in the composer for the user to edit.
+
+  `entry_id` has to be one Eva will fork from — see `EvaWeb.Sessions.Ledger`.
+  """
+  @spec fork(String.t(), String.t()) ::
+          {:ok, %{session_id: String.t(), title: String.t(), prefill: String.t()}}
+          | {:error, term()}
+  def fork(session_id, entry_id) do
+    case Runner.fork(via(session_id), entry_id) do
+      {:ok, fork} ->
+        broadcast_index_change()
+        {:ok, fork}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   catch
     :exit, reason -> {:error, reason}
   end

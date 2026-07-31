@@ -88,6 +88,59 @@ const Hooks = {
     },
   },
 
+  // Copies a message by reading it back off the page. The text is already rendered, so nothing has
+  // to be sent down twice — which matters most for assistant messages, whose every streamed delta
+  // would otherwise carry a second copy of themselves.
+  Copy: {
+    mounted() {
+      this.el.addEventListener("click", () => {
+        const body = document.getElementById(this.el.dataset.copyFrom)
+        if (!body) return
+        // Assistant messages mark their prose, so thinking blocks stay out of the clipboard. A
+        // user bubble has no parts and is copied whole.
+        const parts = [...body.querySelectorAll("[data-copy-part]")]
+        const text = (parts.length ? parts : [body]).map(node => node.innerText).join("\n\n")
+        this.write(text).then(ok => ok && this.confirm())
+      })
+    },
+    // navigator.clipboard is only there on a secure origin, which this app is not once it is
+    // served to anything but localhost — so the old selection dance stays as the fallback.
+    write(text) {
+      if (navigator.clipboard) {
+        return navigator.clipboard.writeText(text).then(() => true, () => this.writeLegacy(text))
+      }
+      return Promise.resolve(this.writeLegacy(text))
+    },
+    writeLegacy(text) {
+      const area = document.createElement("textarea")
+      area.value = text
+      // Off-screen rather than hidden: the selection only works on a rendered element.
+      area.style.cssText = "position:fixed;top:-9999px;opacity:0"
+      document.body.appendChild(area)
+      area.select()
+      const ok = document.execCommand("copy")
+      area.remove()
+      return ok
+    },
+    // Long enough to notice, short enough not to look like a stuck state.
+    confirm() {
+      clearTimeout(this.timer)
+      this.toggle(true)
+      this.timer = setTimeout(() => this.toggle(false), 1200)
+    },
+    // Both icons carry `flex`, so only `hidden` moves — swapping the two for classes that lay out
+    // differently is what makes the row jump.
+    toggle(copied) {
+      this.el.querySelector("[data-icon=idle]").classList.toggle("hidden", copied)
+      const done = this.el.querySelector("[data-icon=done]")
+      done.classList.toggle("hidden", !copied)
+      done.classList.toggle("flex", copied)
+    },
+    destroyed() {
+      clearTimeout(this.timer)
+    },
+  },
+
   ChatInput: {
     mounted() {
       this.el.addEventListener("keydown", (e) => {
@@ -104,6 +157,14 @@ const Hooks = {
       // Cleared from the server after the prompt is accepted. Clearing it on the form's own
       // submit event would race LiveView's serialization and send an empty message.
       this.handleEvent("chat:clear", () => this.reset())
+      // Forking drops the message it branched at back in here to be reworked. The caret goes to
+      // the end so typing continues the prompt instead of landing in front of it.
+      this.handleEvent("chat:fill", ({text}) => {
+        this.el.value = text
+        this.grow()
+        this.el.focus()
+        this.el.setSelectionRange(text.length, text.length)
+      })
       this.grow()
     },
     grow() {
