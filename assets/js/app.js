@@ -216,6 +216,22 @@ const Hooks = {
       const node = e.target.closest("[data-node-id]")
       this.start = {x: e.clientX, y: e.clientY}
       this.moved = false
+      // A drag arms this so its own trailing click is swallowed, and the click handler disarms it.
+      // No click follows a release outside the window, though, so clear it here too — otherwise a
+      // stale flag eats the next unrelated click, which is a button press the user did mean.
+      this.suppressClick = false
+
+      // A port claims the gesture before the node does, so pulling a wire out of a set never also
+      // picks the set up.
+      if (e.target.closest("[data-port]") && node) {
+        e.preventDefault()
+        this.link = {from: node.dataset.nodeId}
+        return
+      }
+
+      // The canvas' own chrome — zoom controls, a project's tidy button. A press on one of those is
+      // not the start of a pan.
+      if (!node && e.target.closest("button")) return
 
       if (node) {
         this.drag = {
@@ -230,7 +246,7 @@ const Hooks = {
     },
 
     handleMove(e) {
-      if (!this.drag && !this.pan) return
+      if (!this.drag && !this.pan && !this.link) return
       const dx = e.clientX - this.start.x
       const dy = e.clientY - this.start.y
 
@@ -242,6 +258,17 @@ const Hooks = {
         }
       }
       if (!this.moved) return
+
+      if (this.link) {
+        this.link.point = this.toWorld(e.clientX, e.clientY)
+        const over = document.elementFromPoint(e.clientX, e.clientY)
+        const node = over && over.closest("[data-node-id]")
+        // Its own set is not a target: a session connected to itself says nothing.
+        const id = node && node.dataset.nodeId
+        this.link.to = id && id !== this.link.from ? id : null
+        this.paintDrag()
+        return
+      }
 
       if (this.pan) {
         this.camera.x = this.pan.originX + dx
@@ -259,6 +286,10 @@ const Hooks = {
     handleUp() {
       this.el.classList.remove("is-panning")
 
+      if (this.link && this.moved && this.link.to) {
+        this.pushEvent("link", {from: this.link.from, to: this.link.to})
+      }
+
       if (this.drag && this.moved) {
         this.suppressClick = true
         this.pushEvent("node_moved", {
@@ -269,11 +300,24 @@ const Hooks = {
         this.pushEvent("drag_end", {})
       }
 
+      // Any gesture that actually moved swallows its trailing click, so releasing a pan over a
+      // wire does not also disconnect it.
+      if (this.moved) this.suppressClick = true
+
       this.drag = null
       this.pan = null
+      this.link = null
       this.moved = false
       this.dropTarget = null
       this.paintDrag()
+    },
+
+    toWorld(clientX, clientY) {
+      const rect = this.el.getBoundingClientRect()
+      return {
+        x: (clientX - rect.left - this.camera.x) / this.camera.scale,
+        y: (clientY - rect.top - this.camera.y) / this.camera.scale,
+      }
     },
 
     // -- Redrawing wires and boxes, mirroring EvaWeb.Proto.Layout --
@@ -291,7 +335,9 @@ const Hooks = {
 
       // Wires follow every node including the one in hand — a wire that let go of its TV mid-drag
       // would read as the connection being broken.
-      this.el.querySelectorAll(".canvas-wire").forEach((path) => {
+      // `[data-from]` and not `.canvas-wire`: each link is a visible wire plus the invisible fat
+      // path that carries its click, and both have to keep up with the TV.
+      this.el.querySelectorAll("[data-from]").forEach((path) => {
         const from = nodes[path.dataset.from]
         const to = nodes[path.dataset.to]
         if (from && to) path.setAttribute("d", this.wirePath(from, to))
@@ -354,18 +400,39 @@ const Hooks = {
       this.paintDrag()
     },
 
-    // Kept separate from deciding the target so a server patch can restore the classes without
+    // Kept separate from deciding the target so a server patch can restore all of this without
     // having to recompute anything.
     paintDrag() {
       this.el.querySelectorAll('[data-box="project"]').forEach((box) => {
         box.classList.toggle("is-drop-target", box.dataset.boxId === this.dropTarget)
       })
       this.el.querySelectorAll("[data-node-id]").forEach((node) => {
-        node.classList.toggle(
-          "is-dragging",
-          !!this.drag && !!this.moved && node === this.drag.node,
-        )
+        const id = node.dataset.nodeId
+        node.classList.toggle("is-dragging", !!this.drag && !!this.moved && node === this.drag.node)
+        node.classList.toggle("is-linking", !!this.link && this.link.from === id)
+        node.classList.toggle("is-link-target", !!this.link && this.link.to === id)
       })
+
+      const preview = this.el.querySelector("#wire-preview")
+      if (!preview) return
+      const source = this.link && this.el.querySelector(`[data-node-id="${this.link.from}"]`)
+      if (source && this.link.point) {
+        preview.setAttribute("d", this.previewPath(source, this.link.point))
+        preview.classList.toggle("is-armed", !!this.link.to)
+      } else {
+        preview.setAttribute("d", "")
+      }
+    },
+
+    // The same shape as a real wire, with the cursor standing in for the far end.
+    previewPath(sourceEl, point) {
+      const {nodeW, nodeH} = this.metrics
+      const x = parseFloat(sourceEl.style.left) || 0
+      const y = parseFloat(sourceEl.style.top) || 0
+      const y1 = y + nodeH * 0.38
+      const x1 = point.x >= x ? x + nodeW : x
+      const bow = Math.max(60, Math.abs(point.x - x1) * 0.45)
+      return `M ${x1} ${y1} C ${x1 + bow} ${y1}, ${point.x - bow} ${point.y}, ${point.x} ${point.y}`
     },
 
     bounds(corners, pad) {

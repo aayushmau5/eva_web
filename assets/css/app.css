@@ -506,6 +506,42 @@
   filter: drop-shadow(0 0 4px rgb(143 227 207 / 0.6));
 }
 
+/* Invisible, and wide enough to actually hit. `pointer-events` is set here rather than on the svg,
+   which stays transparent to the mouse so it never blocks a drag on the canvas behind it. */
+.canvas-wire-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 14;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+
+/* Hovering anywhere along a wire offers to cut it. Red because it is a delete, and there is no
+   confirmation step — drawing it again is one drag. */
+.canvas-link:hover .canvas-wire {
+  stroke: #f87171;
+  stroke-width: 2.5;
+  stroke-dasharray: none;
+  animation: none;
+  filter: drop-shadow(0 0 5px rgb(248 113 113 / 0.5));
+}
+
+/* The wire being pulled out of a port: solid while it is going nowhere, lit once it is over a set
+   that will accept it. */
+.canvas-wire--preview {
+  stroke: color-mix(in oklch, var(--proto-phosphor), transparent 45%);
+  stroke-width: 2;
+  stroke-dasharray: none;
+  animation: none;
+  pointer-events: none;
+}
+
+.canvas-wire--preview.is-armed {
+  stroke: var(--proto-phosphor);
+  stroke-width: 2.5;
+  filter: drop-shadow(0 0 5px rgb(143 227 207 / 0.6));
+}
+
 .canvas-box {
   position: absolute;
   pointer-events: none;
@@ -553,6 +589,32 @@
   color: var(--proto-phosphor);
 }
 
+/* Re-flows the project into a grid where it already sits. Sits at the far end of the box's label
+   row, dim until pointed at — the box itself is click-through, so it cannot be revealed by
+   hovering its parent and has to carry its own affordance. */
+.canvas-box__tidy {
+  position: absolute;
+  top: -1.375rem;
+  right: 0.125rem;
+  padding: 0 0.3125rem;
+  border: 1px solid var(--proto-line);
+  background: var(--proto-bg);
+  font-family: var(--font-mono);
+  font-size: var(--text-4xs);
+  letter-spacing: 0.08em;
+  line-height: 1.05rem;
+  color: #6f9c99;
+  opacity: 0.4;
+  pointer-events: auto;
+  transition: opacity 120ms, color 120ms, border-color 120ms;
+}
+
+.canvas-box__tidy:hover {
+  opacity: 1;
+  border-color: var(--proto-phosphor);
+  color: var(--proto-phosphor);
+}
+
 .canvas-box__meta {
   position: absolute;
   top: -1.25rem;
@@ -562,6 +624,40 @@
   font-size: var(--text-4xs);
   color: #4e7472;
   white-space: nowrap;
+}
+
+/* The connector on the right edge, at the height wires already leave the set. Hidden until the set
+   is hovered so twenty-odd of them don't read as part of the design. */
+.tv-port {
+  position: absolute;
+  top: 38%;
+  right: -5px;
+  height: 11px;
+  width: 11px;
+  border: 1px solid var(--proto-bezel-edge);
+  border-radius: 50%;
+  background: var(--proto-bezel-a);
+  box-shadow: inset 0 0 0 2px var(--proto-bg);
+  opacity: 0;
+  transition: opacity 120ms, box-shadow 120ms;
+  cursor: crosshair;
+}
+
+.tv-node:hover .tv-port,
+.tv-set.is-linking .tv-port {
+  opacity: 1;
+}
+
+.tv-port:hover,
+.tv-set.is-linking .tv-port {
+  border-color: var(--proto-phosphor);
+  box-shadow: inset 0 0 0 2px var(--proto-bg), 0 0 8px rgb(143 227 207 / 0.6);
+}
+
+/* The set a wire is currently over and would connect to on release. */
+.tv-node--canvas.is-link-target .tv-set {
+  border-color: var(--proto-phosphor);
+  box-shadow: 0 0 0 1px rgb(143 227 207 / 0.5), 0 0 18px rgb(143 227 207 / 0.25);
 }
 
 .tv-node--canvas.is-dragging {

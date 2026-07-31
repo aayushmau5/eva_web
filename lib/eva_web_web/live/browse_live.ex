@@ -95,6 +95,32 @@ defmodule EvaWebWeb.BrowseLive do
     end
   end
 
+  def handle_event("tidy", %{"project" => project_id}, socket) do
+    positions =
+      Layout.tidy(project_id, Map.values(socket.assigns.sessions), socket.assigns.positions)
+
+    {:noreply, assign(socket, :positions, positions)}
+  end
+
+  # A wire drawn from one session's port to another. Self-links and duplicates are dropped rather
+  # than rejected loudly — the gesture that produces them is usually just an imprecise one.
+  def handle_event("link", %{"from" => from, "to" => to}, socket) do
+    sessions = socket.assigns.sessions
+
+    known? = is_map(sessions[from]) and is_map(sessions[to])
+    new? = {from, to} not in socket.assigns.links
+
+    if from != to and known? and new? do
+      {:noreply, put_links(socket, socket.assigns.links ++ [{from, to}])}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_event("unlink", %{"from" => from, "to" => to}, socket) do
+    {:noreply, put_links(socket, List.delete(socket.assigns.links, {from, to}))}
+  end
+
   # The ticker is held off for the duration of a drag. A status change re-renders the whole node
   # comprehension — including each node's `style` — which would yank the TV out from under the
   # cursor mid-drag.
@@ -223,6 +249,10 @@ defmodule EvaWebWeb.BrowseLive do
     else
       rects
     end
+  end
+
+  defp put_links(socket, links) do
+    assign(socket, links: links, link_counts: link_counts(links))
   end
 
   defp status_counts(sessions) do

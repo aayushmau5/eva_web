@@ -20,6 +20,7 @@ defmodule EvaWebWeb.TVComponents do
   attr :session, :map, required: true
   attr :selected, :boolean, default: false
   attr :moved, :boolean, default: false
+  attr :port, :boolean, default: false
   attr :link_count, :integer, default: 0
   attr :class, :string, default: nil
   attr :rest, :global
@@ -52,6 +53,9 @@ defmodule EvaWebWeb.TVComponents do
           <span class="tv-grille" aria-hidden="true"></span>
           <span class="tv-led" aria-hidden="true"></span>
         </div>
+        <%!-- Where a new connection is dragged from. Sits at the height the wires already leave
+              the set at, so pulling one out starts where the existing ones are. --%>
+        <span :if={@port} class="tv-port" data-port title="drag to another session to connect"></span>
         <%!-- The wire in the wireframe: a session with links has something plugged into it. --%>
         <svg :if={@link_count > 0} class="tv-wire" viewBox="0 0 40 46" aria-hidden="true">
           <path d="M2 2 C 2 18, 30 14, 30 26 C 30 36, 12 34, 14 44" />
@@ -248,18 +252,38 @@ defmodule EvaWebWeb.TVComponents do
       data-label-gap={@metrics["label-gap"]}
     >
       <div id="canvas-world" class="canvas-world">
-        <svg class="canvas-wires" aria-hidden="true">
-          <path
+        <svg class="canvas-wires">
+          <g
             :for={{from_id, to_id} <- @links}
             :if={@positions[from_id] && @positions[to_id]}
-            data-from={from_id}
-            data-to={to_id}
-            d={Layout.link_path(Layout.link_endpoints(@positions[from_id], @positions[to_id]))}
-            class={[
-              "canvas-wire",
-              @selected in [from_id, to_id] && "is-lit"
-            ]}
-          />
+            class="canvas-link"
+          >
+            <%!-- A 2px wire is not something anyone can hit with a mouse. This one is invisible,
+                  fourteen wide, and carries the click. --%>
+            <path
+              class="canvas-wire-hit"
+              data-from={from_id}
+              data-to={to_id}
+              d={Layout.link_path(Layout.link_endpoints(@positions[from_id], @positions[to_id]))}
+              phx-click="unlink"
+              phx-value-from={from_id}
+              phx-value-to={to_id}
+            >
+              <title>
+                {"#{title_of(@sessions, from_id)} → #{title_of(@sessions, to_id)} · click to disconnect"}
+              </title>
+            </path>
+            <path
+              class={["canvas-wire", @selected in [from_id, to_id] && "is-lit"]}
+              data-from={from_id}
+              data-to={to_id}
+              d={Layout.link_path(Layout.link_endpoints(@positions[from_id], @positions[to_id]))}
+              aria-hidden="true"
+            />
+          </g>
+          <%!-- The wire being pulled out of a port. Rendered here rather than created by the hook
+                so a LiveView patch cannot delete an element it does not know about. --%>
+          <path id="wire-preview" class="canvas-wire canvas-wire--preview" d="" aria-hidden="true" />
         </svg>
 
         <div
@@ -282,6 +306,17 @@ defmodule EvaWebWeb.TVComponents do
           style={box_style(box)}
         >
           <span class="canvas-box__label">{box.name}</span>
+          <%!-- Boxes are click-through so they never steal a drag; the button opts back in. --%>
+          <button
+            :if={sessions_of(@sessions, box.id) != []}
+            type="button"
+            class="canvas-box__tidy"
+            phx-click="tidy"
+            phx-value-project={box.id}
+            title={"tidy #{box.name} back into a grid"}
+          >
+            tidy
+          </button>
         </div>
 
         <.tv
@@ -290,6 +325,7 @@ defmodule EvaWebWeb.TVComponents do
           session={session}
           selected={@selected == session.id}
           moved={@moved == session.id}
+          port
           link_count={Map.get(@link_counts, session.id, 0)}
           class="tv-node--canvas"
           data-node-id={session.id}
@@ -318,7 +354,8 @@ defmodule EvaWebWeb.TVComponents do
           </button>
         </div>
         <p class="text-3xs text-zinc-600">
-          drop a TV in another project to move it there · scroll to zoom · drag the void to pan
+          drop a TV in another project to move it · drag its right-edge port to connect · click a
+          wire to cut it · scroll to zoom
         </p>
       </div>
     </div>
@@ -417,6 +454,13 @@ defmodule EvaWebWeb.TVComponents do
 
   defp sessions_of(sessions, project_id),
     do: Enum.filter(sessions, &(&1.project_id == project_id))
+
+  defp title_of(sessions, id) do
+    case Enum.find(sessions, &(&1.id == id)) do
+      nil -> id
+      session -> session.title
+    end
+  end
 
   defp box_style(box) do
     "left:#{box.x}px;top:#{box.y}px;width:#{box.w}px;height:#{box.h}px"

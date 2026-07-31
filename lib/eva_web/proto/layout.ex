@@ -120,6 +120,35 @@ defmodule EvaWeb.Proto.Layout do
   end
 
   @doc """
+  Re-flows one project's sessions into the same grid `initial_positions/0` uses, anchored at the
+  top-left of where its box already is.
+
+  Anchoring rather than re-deriving the origin is what makes this a tidy and not an undo: a project
+  you deliberately dragged to the far side of the canvas stays there, it just stops being a heap.
+  Sessions keep reading order — top-to-bottom, then left-to-right — so tidying compacts the
+  arrangement you can see instead of shuffling it.
+  """
+  @spec tidy(String.t(), [map()], %{String.t() => map()}) :: %{String.t() => map()}
+  def tidy(project_id, sessions, positions) do
+    case project_rect(project_id, sessions, positions) do
+      nil ->
+        positions
+
+      rect ->
+        sessions
+        |> Enum.filter(&(&1.project_id == project_id))
+        |> Enum.sort_by(&{positions[&1.id].y, positions[&1.id].x})
+        |> Enum.with_index()
+        |> Enum.reduce(positions, fn {session, i}, acc ->
+          Map.put(acc, session.id, %{
+            x: rect.x + @project_pad + rem(i, @cols) * (@node_w + @gap),
+            y: rect.y + @project_pad + div(i, @cols) * (@node_h + @gap)
+          })
+        end)
+    end
+  end
+
+  @doc """
   The project box a dropped session landed in, or nil if it was dropped in open space.
 
   The session being dropped is excluded from the boxes it is tested against. Without that its own
