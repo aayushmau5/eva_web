@@ -151,6 +151,31 @@ const Hooks = {
             this.pushEvent("send", {text})
             this.reset()
           }
+          return
+        }
+        // `!` on an empty box is a mode switch rather than a character — the same key that gets
+        // you into command mode gets you one further, into the one the model never sees. Anywhere
+        // else in the line it is just a `!`, which shell commands are full of.
+        if (e.key === "!" && this.el.value === "") {
+          const next = {prompt: "command", command: "private_command"}[this.mode()]
+          if (next) {
+            e.preventDefault()
+            this.pushEvent("set_mode", {mode: next})
+          }
+          return
+        }
+        // Backing out the way you came in: backspace on an empty box undoes the last `!`.
+        if (e.key === "Backspace" && this.el.value === "") {
+          const back = {command: "prompt", private_command: "command"}[this.mode()]
+          if (back) {
+            e.preventDefault()
+            this.pushEvent("set_mode", {mode: back})
+          }
+          return
+        }
+        if (e.key === "Escape" && this.mode() !== "prompt") {
+          e.preventDefault()
+          this.pushEvent("set_mode", {mode: "prompt"})
         }
       })
       this.el.addEventListener("input", () => this.grow())
@@ -165,7 +190,14 @@ const Hooks = {
         this.el.focus()
         this.el.setSelectionRange(text.length, text.length)
       })
+      // Cycling the mode from the pill puts the caret back where the typing happens.
+      this.handleEvent("chat:focus", () => this.el.focus())
       this.grow()
+    },
+    // Read off the element each time rather than cached: the server owns the mode and re-renders
+    // the attribute, so anything remembered here goes stale the moment the pill is clicked.
+    mode() {
+      return this.el.dataset.mode || "prompt"
     },
     grow() {
       const max = 144

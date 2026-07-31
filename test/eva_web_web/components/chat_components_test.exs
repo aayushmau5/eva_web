@@ -404,6 +404,104 @@ defmodule EvaWebWeb.ChatComponentsTest do
     end
   end
 
+  describe "composer/1 modes" do
+    defp composer(mode, running \\ false) do
+      render_component(&ChatComponents.composer/1, mode: mode, running: running, disabled: false)
+    end
+
+    test "starts in prompt mode and says how to leave it" do
+      html = composer(:prompt)
+
+      assert html =~ "prompt"
+      assert html =~ "! for a command"
+      assert html =~ ~s(data-mode="prompt")
+      assert html =~ "Send a message…"
+    end
+
+    # The hook reads the mode off this attribute to decide whether a leading `!` is a character or
+    # a switch, so it is load-bearing rather than decorative.
+    test "publishes the mode to the input the hook is bound to" do
+      assert composer(:command) =~ ~s(data-mode="command")
+      assert composer(:private_command) =~ ~s(data-mode="private_command")
+    end
+
+    test "a command mode says what will happen to the command" do
+      assert composer(:command) =~ "Run a shell command…"
+      assert composer(:private_command) =~ "not sent to the model"
+    end
+
+    # Eva refuses to run one mid-turn, so the composer should not invite it.
+    test "says why a command will not run while the agent works" do
+      assert composer(:command, true) =~ "Eva is working"
+    end
+
+    test "offers the mode itself as a control" do
+      assert composer(:prompt) =~ ~s(phx-click="cycle_mode")
+    end
+
+    test "a command in flight can be stopped instead of sent to" do
+      html =
+        render_component(&ChatComponents.composer/1,
+          mode: :prompt,
+          running: false,
+          disabled: false,
+          command_running: true
+        )
+
+      assert html =~ ~s(phx-click="cancel_bash")
+      assert html =~ "Stop the command"
+      refute html =~ ~s(id="send-button")
+    end
+
+    # Stopping the agent and stopping a command are different buttons doing different things, and
+    # Eva won't run a command mid-turn, so they never appear together.
+    test "stopping the agent is a separate control from stopping a command" do
+      html = composer(:prompt, true)
+
+      assert html =~ ~s(id="cancel-button")
+      refute html =~ ~s(phx-click="cancel_bash")
+    end
+  end
+
+  describe "message/1 for bash rows" do
+    defp bash_row(attrs) do
+      message =
+        struct!(%Eva.Agent.Messages.BashExecutionMessage{command: "ls", output: "a.ex"}, attrs)
+
+      item = EvaWeb.Sessions.Transcript.bash_finished("m2", message)
+
+      render_component(&ChatComponents.message/1, item: item)
+    end
+
+    test "marks a command the user ran and opens it on its output" do
+      html = bash_row(exit_code: 0)
+
+      assert html =~ ~s(title="You ran this")
+      assert html =~ "<details"
+      assert html =~ "open"
+    end
+
+    test "marks a command the model never sees" do
+      html = bash_row(exclude_from_context: true)
+
+      assert html =~ "private"
+      assert html =~ ~s(title="Kept out of the model's context")
+    end
+
+    test "leaves a run that went to the model unmarked" do
+      refute bash_row(exclude_from_context: false) =~ "private"
+    end
+
+    # The model's own bash calls arrive as tool rows and must stay collapsed and unbadged.
+    test "an agent tool row is neither attributed nor opened" do
+      item = EvaWeb.Sessions.Transcript.tool_started("c1", "bash", %{"command" => "ls"})
+      html = render_component(&ChatComponents.message/1, item: item)
+
+      refute html =~ "You ran this"
+      refute html =~ "<details open"
+    end
+  end
+
   describe "short_time/1 and long_time/1" do
     test "gives the clock time on the day it happened" do
       {date, {hour, minute, _second}} = :calendar.local_time()

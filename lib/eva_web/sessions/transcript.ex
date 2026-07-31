@@ -30,7 +30,9 @@ defmodule EvaWeb.Sessions.Transcript do
           progress: String.t() | nil,
           at: float() | nil,
           entry_id: String.t() | nil,
-          forks: [Ledger.fork()]
+          forks: [Ledger.fork()],
+          origin: :agent | :user,
+          private?: boolean()
         }
 
   # `at`, `entry_id` and `forks` come from `EvaWeb.Sessions.Ledger` rather than from the message: a
@@ -50,7 +52,11 @@ defmodule EvaWeb.Sessions.Transcript do
     progress: nil,
     at: nil,
     entry_id: nil,
-    forks: []
+    forks: [],
+    # Who ran it. A bash row the user typed themselves and one the model called look the same
+    # otherwise, and which of the two it was is most of what the row means.
+    origin: :agent,
+    private?: false
   }
 
   @doc """
@@ -149,6 +155,47 @@ defmodule EvaWeb.Sessions.Transcript do
     |> put_tool_name(tool_name)
   end
 
+  @doc """
+  A row for a command the user ran themselves, still going.
+
+  Eva only reports a `!` command once it has finished — it is a blocking call, not a stream — so
+  this is what stands in for it meanwhile. It shares the shape of a tool row because that is what
+  it becomes: `bash_finished/2` replaces it under the same id.
+  """
+  @spec bash_started(String.t(), String.t(), boolean() | nil) :: item()
+  def bash_started(id, command, private?) do
+    %{
+      @base
+      | id: id,
+        kind: :tool,
+        name: "bash",
+        args: %{command: command},
+        status: :running,
+        at: now(),
+        origin: :user,
+        # Eva reads the flag off the caller's options, which are absent as often as they are false.
+        private?: private? == true
+    }
+  end
+
+  @doc "A finished bash row, replayed or live. `cancelled` reads as a failure, because it is one."
+  @spec bash_finished(String.t(), Messages.BashExecutionMessage.t()) :: item()
+  def bash_finished(id, %Messages.BashExecutionMessage{} = message) do
+    ok? = message.exit_code in [0, nil] and not message.cancelled
+
+    %{
+      @base
+      | id: id,
+        kind: :tool,
+        name: "bash",
+        args: %{command: message.command},
+        status: if(ok?, do: :ok, else: :error),
+        text: message.output || "",
+        origin: :user,
+        private?: message.exclude_from_context
+    }
+  end
+
   @doc "A one-line summary of tool arguments for the collapsed row."
   @spec args_summary(map() | nil) :: String.t()
   def args_summary(args) when args in [nil, %{}], do: ""
@@ -206,17 +253,7 @@ defmodule EvaWeb.Sessions.Transcript do
   end
 
   defp to_item(%Messages.BashExecutionMessage{} = message, index, _args) do
-    [
-      %{
-        @base
-        | id: message_id(index),
-          kind: :tool,
-          name: "bash",
-          args: %{command: message.command},
-          status: if(message.exit_code in [0, nil], do: :ok, else: :error),
-          text: message.output || ""
-      }
-    ]
+    [bash_finished(message_id(index), message)]
   end
 
   defp to_item(%Messages.CompactionSummaryMessage{} = message, index, _args) do

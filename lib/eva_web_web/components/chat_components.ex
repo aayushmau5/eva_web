@@ -813,6 +813,17 @@ defmodule EvaWebWeb.ChatComponents do
 
   defp said_something?(%{blocks: blocks}), do: Enum.any?(blocks, &match?({:text, _text}, &1))
 
+  # A command runs whether or not Eva is mid-turn is up to Eva, which refuses while the agent
+  # works — so the placeholder says so rather than letting the user type into a refusal.
+  defp composer_placeholder(:prompt, true), do: "Queue a follow-up…"
+  defp composer_placeholder(:prompt, false), do: "Send a message…"
+
+  defp composer_placeholder(_command_mode, true),
+    do: "Eva is working — commands run when it stops"
+
+  defp composer_placeholder(:command, false), do: "Run a shell command…"
+  defp composer_placeholder(:private_command, false), do: "Run a command, keep it off the model…"
+
   @doc """
   The fork glyph, drawn as GitHub draws it.
 
@@ -844,8 +855,10 @@ defmodule EvaWebWeb.ChatComponents do
         class="max-w-[85%] whitespace-pre-wrap break-words border border-zinc-700 bg-[#1c1c1c] px-3 py-2 text-sm text-zinc-100"
       >{@item.text}</div>
 
+      <%!-- Forks first, then the controls, then the time: the timestamp is the one thing here that
+            is always present, so it anchors the right edge under the corner of the bubble while
+            everything else grows leftwards from it. --%>
       <div class="flex max-w-[85%] flex-wrap items-center justify-end gap-1.5">
-        <.message_time at={@item.at} />
         <span :if={@item.forks != []} class="text-3xs uppercase tracking-wider text-zinc-600">
           {length(@item.forks)} {ngettext_fork(length(@item.forks))}
         </span>
@@ -859,8 +872,7 @@ defmodule EvaWebWeb.ChatComponents do
           <span class="truncate">{fork.title}</span>
         </.link>
         <.copy_button item={@item} />
-        <%!-- Last, so it stays under the corner of the bubble however many forks sit beside it.
-              Only offered once the message has an entry to fork at, which is a beat after it is
+        <%!-- Only offered once the message has an entry to fork at, which is a beat after it is
               sent. --%>
         <button
           :if={@item.entry_id}
@@ -872,6 +884,7 @@ defmodule EvaWebWeb.ChatComponents do
         >
           <.fork_icon class="size-3.5" />
         </button>
+        <.message_time at={@item.at} />
       </div>
     </div>
     """
@@ -930,8 +943,11 @@ defmodule EvaWebWeb.ChatComponents do
   def message(%{item: %{kind: :tool}} = assigns) do
     ~H"""
     <div class="px-4 py-1">
+      <%!-- A command you ran yourself opens with its output showing: you ran it to read it. The
+            model's own calls stay shut, or a turn with a dozen of them buries the reply. --%>
       <details
         id={"#{@item.id}-output"}
+        open={@item.origin == :user}
         phx-hook="KeepOpen"
         class="max-w-[85%] border border-zinc-800 bg-[#111] text-xs"
       >
@@ -943,6 +959,21 @@ defmodule EvaWebWeb.ChatComponents do
             title={"MCP server: #{@item.server}"}
           >
             {@item.server}
+          </span>
+          <%!-- Without this a command you ran and one the model ran are the same row. --%>
+          <span
+            :if={@item.origin == :user}
+            class="shrink-0 border border-emerald-900 px-1 text-4xs uppercase tracking-wider text-emerald-600"
+            title="You ran this"
+          >
+            you
+          </span>
+          <span
+            :if={@item.private?}
+            class="shrink-0 border border-amber-900/70 px-1 text-4xs uppercase tracking-wider text-amber-600/90"
+            title="Kept out of the model's context"
+          >
+            private
           </span>
           <span class="font-medium text-zinc-300">{@item.name}</span>
           <span class="min-w-0 truncate text-zinc-600">{Transcript.args_summary(@item.args)}</span>
@@ -1075,23 +1106,81 @@ defmodule EvaWebWeb.ChatComponents do
     """
   end
 
+  @modes [
+    prompt: %{label: "prompt", hint: "! for a command"},
+    command: %{label: "command", hint: "! again to keep it private · esc to leave"},
+    private_command: %{label: "private command", hint: "not sent to the model · esc to leave"}
+  ]
+
+  @doc "The mode the composer is in, and the way out of it. Clicking it cycles."
+  attr :mode, :atom, required: true
+
+  def composer_mode(assigns) do
+    assigns = assign(assigns, mode_info: Keyword.fetch!(@modes, assigns.mode))
+
+    ~H"""
+    <div class="mx-auto mb-2 flex max-w-3xl items-center gap-2">
+      <button
+        type="button"
+        phx-click="cycle_mode"
+        title="Switch mode"
+        class={[
+          "flex items-center gap-1.5 border px-2 py-0.5 text-3xs uppercase tracking-wider transition-colors",
+          mode_class(@mode)
+        ]}
+      >
+        <span :if={@mode != :prompt} class="font-mono normal-case">!</span>
+        {@mode_info.label}
+      </button>
+      <span class="truncate text-3xs text-zinc-700">{@mode_info.hint}</span>
+    </div>
+    """
+  end
+
+  defp mode_class(:prompt), do: "border-zinc-800 text-zinc-600 hover:border-zinc-600"
+  defp mode_class(:command), do: "border-emerald-900 text-emerald-600 hover:border-emerald-700"
+
+  defp mode_class(:private_command),
+    do: "border-amber-900/70 text-amber-600/90 hover:border-amber-700"
+
   @doc "Message input. Enter sends, shift+Enter inserts a newline (see the ChatInput hook)."
   attr :running, :boolean, required: true
   attr :disabled, :boolean, default: false
+  attr :mode, :atom, default: :prompt
+  attr :command_running, :boolean, default: false
 
   def composer(assigns) do
     ~H"""
     <div class="shrink-0 border-t border-zinc-800 bg-[#0c0c0c] p-4">
+      <.composer_mode mode={@mode} />
       <form id="composer" phx-submit="send" class="mx-auto flex max-w-3xl items-end gap-3">
+        <%!-- The mode rides on the element the hook is bound to: it decides there whether a
+              leading `!` is text or a mode switch, without a round trip to ask. --%>
         <textarea
           id="chat-input"
           name="text"
           rows="1"
           phx-hook="ChatInput"
+          data-mode={@mode}
           disabled={@disabled}
-          placeholder={if @running, do: "Queue a follow-up…", else: "Send a message…"}
-          class="min-h-[var(--composer-row)] flex-1 resize-none border border-zinc-700 bg-transparent px-3 py-2 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-zinc-500 disabled:opacity-50"
+          placeholder={composer_placeholder(@mode, @running)}
+          class={[
+            "min-h-[var(--composer-row)] flex-1 resize-none border bg-transparent px-3 py-2 text-sm text-white outline-none placeholder:text-zinc-600 disabled:opacity-50",
+            @mode == :prompt && "border-zinc-700 focus:border-zinc-500",
+            @mode == :command && "border-emerald-900 font-mono focus:border-emerald-700",
+            @mode == :private_command && "border-amber-900/70 font-mono focus:border-amber-700"
+          ]}
         />
+        <button
+          :if={@command_running}
+          id="cancel-command-button"
+          type="button"
+          phx-click="cancel_bash"
+          title="Stop the command"
+          class="flex h-[var(--composer-row)] w-9 shrink-0 items-center justify-center border border-zinc-700 text-zinc-300 transition-colors hover:border-red-700 hover:text-red-400"
+        >
+          <.icon name="hero-stop-mini" class="size-4" />
+        </button>
         <button
           :if={@running}
           id="cancel-button"
@@ -1103,13 +1192,21 @@ defmodule EvaWebWeb.ChatComponents do
           <.icon name="hero-stop-mini" class="size-4" />
         </button>
         <button
-          :if={not @running}
+          :if={not @running and not @command_running}
           id="send-button"
           type="submit"
           disabled={@disabled}
-          class="flex h-[var(--composer-row)] w-9 shrink-0 items-center justify-center bg-[#116a34b5] text-white transition-colors hover:bg-[#116a34] disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:opacity-50"
+          class={[
+            "flex h-[var(--composer-row)] w-9 shrink-0 items-center justify-center text-white transition-colors disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:opacity-50",
+            @mode == :prompt && "bg-[#116a34b5] hover:bg-[#116a34]",
+            @mode == :command && "bg-emerald-900/70 hover:bg-emerald-800",
+            @mode == :private_command && "bg-amber-900/70 hover:bg-amber-800"
+          ]}
         >
-          <.icon name="hero-arrow-right-mini" class="size-4" />
+          <.icon
+            name={if @mode == :prompt, do: "hero-arrow-right-mini", else: "hero-play-mini"}
+            class="size-4"
+          />
         </button>
       </form>
     </div>

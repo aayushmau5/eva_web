@@ -244,12 +244,49 @@ defmodule EvaWeb.Sessions do
   Sends a prompt. When the harness is mid-run the message is queued as a follow-up rather than
   rejected, so typing while Eva is working does something sensible.
   """
-  @spec prompt(String.t(), String.t()) :: :ok | {:error, String.t()}
-  def prompt(session_id, text), do: Runner.prompt(via(session_id), text)
+  @spec prompt(String.t(), String.t()) :: :ok | {:error, term()}
+  def prompt(session_id, text) do
+    Runner.prompt(via(session_id), text)
+  catch
+    # A session that has died, or is wedged behind something slow, must not take the caller's
+    # LiveView down with it — every other call into a Runner is guarded the same way.
+    :exit, reason -> {:error, reason}
+  end
 
   @doc "Interrupts the running agent loop."
   @spec cancel(String.t()) :: :ok
   def cancel(session_id), do: Runner.cancel(via(session_id))
+
+  @doc """
+  Runs a shell command in the session's working directory and records it in the transcript.
+
+  This is the `!` escape hatch: the command is the user's, not the model's, but it is kept in the
+  conversation either way. With `exclude_from_context: true` it stays out of what the model is
+  sent, which is the difference between showing Eva what you just ran and only looking at it
+  yourself.
+
+  Eva refuses while the agent is mid-turn — injecting into the message list under a running loop
+  would be overwritten by it — which comes back as `{:error, :agent_running}`.
+  """
+  @spec run_bash(String.t(), String.t(), keyword()) :: {:ok, struct()} | {:error, term()}
+  def run_bash(session_id, command, opts \\ []) do
+    Runner.run_bash(via(session_id), command, opts)
+  catch
+    :exit, reason -> {:error, reason}
+  end
+
+  @doc """
+  Stops the command a session is running.
+
+  The command is still recorded — Eva reports a killed command with `cancelled: true` and whatever
+  it managed to print, so the transcript says what happened rather than losing it.
+  """
+  @spec cancel_bash(String.t()) :: :ok | {:error, term()}
+  def cancel_bash(session_id) do
+    Runner.cancel_bash(via(session_id))
+  catch
+    :exit, reason -> {:error, reason}
+  end
 
   @doc """
   Switches an MCP server on or off for a session, or for every session to come.

@@ -14,6 +14,9 @@ defmodule EvaWeb.Application do
       # Eva coding sessions: one supervised Runner per open session, looked up by session id.
       {Registry, keys: :unique, name: EvaWeb.SessionRegistry},
       {DynamicSupervisor, strategy: :one_for_one, name: EvaWeb.SessionSupervisor},
+      # Waiting rooms for calls a Runner must not sit in itself — see
+      # `EvaWeb.Sessions.Runner.handle_call/3` for `:run_bash`.
+      {Task.Supervisor, name: EvaWeb.TaskSupervisor},
       # Start to serve requests, typically the last entry
       EvaWebWeb.Endpoint
     ]

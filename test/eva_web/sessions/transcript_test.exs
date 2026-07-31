@@ -151,6 +151,51 @@ defmodule EvaWeb.Sessions.TranscriptTest do
     end
   end
 
+  describe "bash rows" do
+    defp bash(attrs) do
+      struct!(%Messages.BashExecutionMessage{command: "ls", output: "a.ex"}, attrs)
+    end
+
+    test "a command the user ran is attributed to them, not the model" do
+      assert %{kind: :tool, name: "bash", origin: :user, status: :ok, text: "a.ex"} =
+               Transcript.bash_finished("m3", bash(exit_code: 0))
+
+      assert %{args: %{command: "ls"}} = Transcript.bash_finished("m3", bash(exit_code: 0))
+    end
+
+    test "a non-zero exit reads as a failure" do
+      assert %{status: :error} = Transcript.bash_finished("m3", bash(exit_code: 3))
+    end
+
+    # Eva reports a killed command with whatever it managed to print and no useful exit code, so
+    # the flag is the only thing that says it didn't finish.
+    test "a cancelled command reads as a failure even with a clean exit code" do
+      assert %{status: :error} =
+               Transcript.bash_finished("m3", bash(exit_code: 0, cancelled: true))
+    end
+
+    test "carries whether the run was kept out of the model's context" do
+      assert %{private?: true} = Transcript.bash_finished("m3", bash(exclude_from_context: true))
+
+      assert %{private?: false} =
+               Transcript.bash_finished("m3", bash(exclude_from_context: false))
+    end
+
+    test "stands in for a command that is still running" do
+      item = Transcript.bash_started("m3", "sleep 1", true)
+
+      assert %{kind: :tool, name: "bash", status: :running, origin: :user, private?: true} = item
+      assert item.args == %{command: "sleep 1"}
+      assert is_float(item.at)
+    end
+
+    test "a replayed command keeps the same shape as the live one" do
+      [replayed] = Transcript.to_items([bash(exit_code: 0)])
+
+      assert %{id: "m0", origin: :user, status: :ok} = replayed
+    end
+  end
+
   describe "args_summary/1" do
     test "is blank when there is nothing to show" do
       assert Transcript.args_summary(nil) == ""

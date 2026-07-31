@@ -50,7 +50,8 @@ defmodule EvaWeb.Sessions.Runner do
           messages: [struct()],
           running?: boolean(),
           mcp: MCP.t(),
-          ledger: Ledger.t()
+          ledger: Ledger.t(),
+          command: String.t() | nil
         }
   def snapshot(server), do: GenServer.call(server, :snapshot)
 
@@ -67,6 +68,28 @@ defmodule EvaWeb.Sessions.Runner do
 
   @spec prompt(GenServer.server(), String.t()) :: :ok | {:error, String.t()}
   def prompt(server, text), do: GenServer.call(server, {:prompt, text})
+
+  @doc """
+  Runs a shell command in the session's working directory.
+
+  Eva runs it synchronously and answers only when the command is done, so this call waits with it —
+  the caller's own timeout would otherwise fire while the command is still running, and the reply
+  would land in a mailbox nobody is reading. What bounds it is Eva's `:timeout`, not this.
+  """
+  @spec run_bash(GenServer.server(), String.t(), keyword()) ::
+          {:ok, struct()} | {:error, term()}
+  def run_bash(server, command, opts \\ []) do
+    GenServer.call(server, {:run_bash, command, opts}, :infinity)
+  end
+
+  @doc """
+  Kills the command a session is running.
+
+  The command still finishes the ordinary way — Eva reports it with `cancelled: true` rather than
+  dropping it — so the caller of `run_bash/3` gets its reply and the transcript keeps the record.
+  """
+  @spec cancel_bash(GenServer.server()) :: :ok | {:error, term()}
+  def cancel_bash(server), do: GenServer.call(server, :cancel_bash)
 
   @spec cancel(GenServer.server()) :: :ok
   def cancel(server), do: GenServer.call(server, :cancel)
@@ -130,6 +153,9 @@ defmodule EvaWeb.Sessions.Runner do
       # off the file itself — see `EvaWeb.Sessions.Ledger`.
       session_path: entry.session_path,
       running?: false,
+      # The `!` command in flight, if any. Held here rather than in the views so that one opened
+      # mid-command still shows the row and the button that stops it.
+      command: nil,
       titled?: not is_nil(entry.title),
       # Read after the session has finished starting its clients, so a server that connects
       # instantly is already `:connected` here rather than only via the event that we're too late
@@ -144,7 +170,8 @@ defmodule EvaWeb.Sessions.Runner do
       messages: CodingSession.messages(state.session_pid),
       running?: state.running?,
       mcp: state.mcp,
-      ledger: Ledger.read(state.session_path)
+      ledger: Ledger.read(state.session_path),
+      command: state.command
     }
 
     {:reply, reply, state}
@@ -159,6 +186,25 @@ defmodule EvaWeb.Sessions.Runner do
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
+  end
+
+  # Eva broadcasts the finished command as a `MessageEnd`, which reaches every view watching the
+  # session — so the row is not published from here, only the outcome the caller is waiting on.
+  def handle_call({:run_bash, command, opts}, from, state) do
+    # Answered from the task rather than here: Eva replies to `run_bash` only when the command is
+    # done, and blocking this process meanwhile would stall every other call to the session —
+    # prompts, snapshots, the cancel that is meant to stop the command in the first place.
+    session_pid = state.session_pid
+
+    Task.Supervisor.start_child(EvaWeb.TaskSupervisor, fn ->
+      GenServer.reply(from, CodingSession.run_bash(session_pid, command, opts))
+    end)
+
+    {:noreply, state}
+  end
+
+  def handle_call(:cancel_bash, _from, state) do
+    {:reply, CodingSession.cancel_bash(state.session_pid), state}
   end
 
   def handle_call({:prompt, text}, _from, state) do
@@ -221,6 +267,22 @@ defmodule EvaWeb.Sessions.Runner do
     broadcast(state, event)
     publish_ledger(state)
     {:noreply, maybe_title_from(state, message)}
+  end
+
+  def handle_info(
+        %Events.MessageStart{message: %Messages.BashExecutionMessage{} = message} = event,
+        state
+      ) do
+    broadcast(state, event)
+    {:noreply, %{state | command: message.command}}
+  end
+
+  def handle_info(
+        %Events.MessageEnd{message: %Messages.BashExecutionMessage{}} = event,
+        state
+      ) do
+    broadcast(state, event)
+    {:noreply, %{state | command: nil}}
   end
 
   # -- MCP events --

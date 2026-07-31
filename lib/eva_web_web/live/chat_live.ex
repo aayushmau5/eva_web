@@ -52,6 +52,9 @@ defmodule EvaWebWeb.ChatLive do
        rename_form: nil,
        user_rows: [],
        prefill: nil,
+       mode: :prompt,
+       pending_bash: nil,
+       deferred: [],
        settings: Settings.get(),
        show_settings: false,
        fonts: :loading
@@ -186,6 +189,17 @@ defmodule EvaWebWeb.ChatLive do
       text == "" or is_nil(socket.assigns.session_id) ->
         {:noreply, socket}
 
+      socket.assigns.mode != :prompt ->
+        {:noreply, run_command(socket, text)}
+
+      # Eva would take this and park it in the harness queue until some future turn, where it
+      # would sit invisibly. Holding it here means it goes when the command is done and not before.
+      socket.assigns.pending_bash ->
+        {:noreply,
+         socket
+         |> assign(:deferred, socket.assigns.deferred ++ [text])
+         |> push_event("chat:clear", %{})}
+
       true ->
         # The user's bubble is rendered from Eva's own MessageStart rather than inserted
         # optimistically, because Eva rewrites `/skill:` prompts before storing them.
@@ -198,8 +212,12 @@ defmodule EvaWebWeb.ChatLive do
 
             {:noreply, push_event(socket, "chat:clear", %{})}
 
-          {:error, reason} ->
+          # Eva answers with a sentence; a dead or wedged runner answers with an exit reason.
+          {:error, reason} when is_binary(reason) ->
             {:noreply, put_flash(socket, :error, reason)}
+
+          {:error, reason} ->
+            {:noreply, put_flash(socket, :error, "Could not send: #{describe(reason)}")}
         end
     end
   end
@@ -217,6 +235,40 @@ defmodule EvaWebWeb.ChatLive do
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "Could not fork: #{describe(reason)}")}
+    end
+  end
+
+  # -- Composer modes --
+
+  # The keyboard drives this from the ChatInput hook (`!` to descend, backspace on an empty box and
+  # escape to come back), and the pill is the same thing for people who would rather click.
+  def handle_event("set_mode", %{"mode" => mode}, socket) do
+    {:noreply, assign(socket, :mode, parse_mode(mode))}
+  end
+
+  def handle_event("cycle_mode", _params, socket) do
+    next =
+      case socket.assigns.mode do
+        :prompt -> :command
+        :command -> :private_command
+        :private_command -> :prompt
+      end
+
+    {:noreply, socket |> assign(:mode, next) |> push_event("chat:focus", %{})}
+  end
+
+  # The command still comes back — Eva reports a killed one with `cancelled: true` and whatever it
+  # printed — so the row finishes the ordinary way and there is nothing to tidy up here.
+  def handle_event("cancel_bash", _params, socket) do
+    case Sessions.cancel_bash(socket.assigns.session_id) do
+      :ok ->
+        {:noreply, socket}
+
+      {:error, :no_command_running} ->
+        {:noreply, assign(socket, :pending_bash, nil)}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Could not stop: #{describe(reason)}")}
     end
   end
 
@@ -369,6 +421,18 @@ defmodule EvaWebWeb.ChatLive do
      |> stream_insert(:messages, item)}
   end
 
+  # Eva announces a `!` command when it starts it, not when it finishes — this is the row that
+  # stands in until the output arrives, in every window rather than only the one that ran it.
+  def handle_info(
+        {:eva, %Events.MessageStart{message: %Messages.BashExecutionMessage{} = message}},
+        socket
+      ) do
+    {id, socket} = next_id(socket)
+    item = Transcript.bash_started(id, message.command, message.exclude_from_context)
+
+    {:noreply, socket |> assign(:pending_bash, id) |> stream_insert(:messages, item)}
+  end
+
   def handle_info(
         {:eva, %Events.MessageStart{message: %Messages.AssistantMessage{} = message}},
         socket
@@ -456,6 +520,25 @@ defmodule EvaWebWeb.ChatLive do
     {:noreply, stream_insert(socket, :messages, item)}
   end
 
+  # A command Eva has finished with. It arrives as an ordinary message event, so every view
+  # watching the session gets the row — not just the one whose composer ran it. The optimistic
+  # row this replaces is claimed by id, so the two never both appear.
+  def handle_info(
+        {:eva, %Events.MessageEnd{message: %Messages.BashExecutionMessage{} = message}},
+        socket
+      ) do
+    {id, socket} =
+      case socket.assigns.pending_bash do
+        nil -> next_id(socket)
+        id -> {id, assign(socket, :pending_bash, nil)}
+      end
+
+    {:noreply,
+     socket
+     |> stream_insert(:messages, Transcript.bash_finished(id, message))
+     |> flush_deferred()}
+  end
+
   # Tool results arrive again as messages; the tool row above already shows them.
   def handle_info({:eva, _event}, socket), do: {:noreply, socket}
 
@@ -497,6 +580,18 @@ defmodule EvaWebWeb.ChatLive do
   def handle_async(:fonts, {:exit, reason}, socket) do
     Logger.warning("ChatLive: font lookup failed: #{inspect(reason)}")
     {:noreply, assign(socket, :fonts, %{ui: [], mono: []})}
+  end
+
+  # The row itself comes from Eva's event, so all that is left here is the refusal — and clearing
+  # the placeholder row, which would otherwise spin forever on a command that never ran.
+  def handle_async(:run_bash, {:ok, {:error, reason}}, socket) do
+    {:noreply, drop_pending_bash(socket, describe_bash_error(reason))}
+  end
+
+  def handle_async(:run_bash, {:ok, _result}, socket), do: {:noreply, socket}
+
+  def handle_async(:run_bash, {:exit, reason}, socket) do
+    {:noreply, drop_pending_bash(socket, "Command failed: #{describe(reason)}")}
   end
 
   def handle_async(:provider_models, {:ok, {provider, result}}, socket) do
@@ -624,12 +719,12 @@ defmodule EvaWebWeb.ChatLive do
           </div>
 
           <div
-            :if={@queued_messages != []}
+            :if={@queued_messages != [] or @deferred != []}
             class="shrink-0 border-t border-zinc-800 bg-[#0c0c0c] px-4 py-2"
           >
             <div class="mx-auto flex max-w-3xl flex-col gap-1.5">
               <div
-                :for={msg <- @queued_messages}
+                :for={msg <- @queued_messages ++ @deferred}
                 class="flex items-center gap-2 text-sm text-zinc-500"
               >
                 <.icon
@@ -641,7 +736,12 @@ defmodule EvaWebWeb.ChatLive do
             </div>
           </div>
 
-          <.composer running={@running?} disabled={is_nil(@session_id)} />
+          <.composer
+            running={@running?}
+            disabled={is_nil(@session_id)}
+            mode={@mode}
+            command_running={not is_nil(@pending_bash)}
+          />
         </div>
 
         <.mcp_panel mcp={@mcp} open={@show_mcp and not is_nil(@session_id)} />
@@ -659,7 +759,7 @@ defmodule EvaWebWeb.ChatLive do
     socket = close_session(socket)
 
     with {:ok, pid} <- Sessions.ensure_started(session_id),
-         {:ok, %{messages: messages, running?: running?, mcp: mcp, ledger: ledger}} <-
+         {:ok, %{messages: messages, running?: running?, mcp: mcp, ledger: ledger} = snapshot} <-
            Sessions.snapshot(session_id) do
       Sessions.subscribe(session_id)
       items = Transcript.to_items(messages, ledger)
@@ -673,7 +773,11 @@ defmodule EvaWebWeb.ChatLive do
         running?: running?,
         current_id: nil,
         current_at: nil,
-        next_index: length(items),
+        # Counted in messages, not rows. Ids are the message's own index, and rows are fewer —
+        # tool results are keyed by call id and empty assistant messages render as nothing — so
+        # starting from the row count hands the next live row an id a replayed one already holds,
+        # and the stream overwrites that row instead of appending.
+        next_index: length(messages),
         tool_args: tool_args(messages),
         monitor_ref: Process.monitor(pid),
         page_title: session.title || "Eva",
@@ -682,6 +786,7 @@ defmodule EvaWebWeb.ChatLive do
       )
       |> assign_sessions()
       |> stream(:messages, items, reset: true)
+      |> restore_command(snapshot.command)
       |> maybe_prefill(session_id)
     else
       {:error, reason} ->
@@ -715,10 +820,84 @@ defmodule EvaWebWeb.ChatLive do
       rename_form: nil,
       mcp: MCP.empty(),
       show_mcp: false,
-      user_rows: []
+      user_rows: [],
+      mode: :prompt,
+      pending_bash: nil,
+      deferred: []
     )
     |> stream(:messages, [], reset: true)
   end
+
+  # -- Commands --
+
+  # Off the LiveView process: Eva answers only when the command is done, and waiting inline would
+  # freeze this view — no scrolling, no switching sessions, not even the stop button — for as long
+  # as it runs. The row itself comes from Eva's `MessageStart`, so every window gets one.
+  defp run_command(socket, command) do
+    private? = socket.assigns.mode == :private_command
+    session_id = socket.assigns.session_id
+
+    socket
+    |> assign(:mode, :prompt)
+    |> push_event("chat:clear", %{})
+    |> start_async(:run_bash, fn ->
+      Sessions.run_bash(session_id, command, exclude_from_context: private?)
+    end)
+  end
+
+  # A view opened while a command is running still has to show it, and the button that stops it —
+  # the row only reaches the transcript when the command ends, which may be minutes away.
+  defp restore_command(socket, nil), do: socket
+
+  defp restore_command(socket, command) do
+    {id, socket} = next_id(socket)
+
+    socket
+    |> assign(:pending_bash, id)
+    |> stream_insert(:messages, Transcript.bash_started(id, command, false))
+  end
+
+  # Sends what was typed while the command ran, in the order it was typed. The first one starts a
+  # turn and the rest queue behind it as follow-ups, which is what the strip above the composer is
+  # already there to show.
+  defp flush_deferred(%{assigns: %{deferred: []}} = socket), do: socket
+
+  defp flush_deferred(socket) do
+    texts = socket.assigns.deferred
+
+    failed =
+      Enum.filter(texts, fn text ->
+        match?({:error, _reason}, Sessions.prompt(socket.assigns.session_id, text))
+      end)
+
+    socket
+    |> assign(deferred: [], queued_messages: socket.assigns.queued_messages ++ (texts -- failed))
+    |> then(fn socket ->
+      if failed == [],
+        do: socket,
+        else: put_flash(socket, :error, "Could not send #{length(failed)} queued message(s).")
+    end)
+  end
+
+  # Nothing ran, so the placeholder row is a lie — but a stream row can only be replaced, not
+  # withdrawn by assigning around it, so it is deleted outright.
+  defp drop_pending_bash(socket, message) do
+    socket =
+      case socket.assigns.pending_bash do
+        nil -> socket
+        id -> stream_delete_by_dom_id(socket, :messages, "messages-#{id}")
+      end
+
+    socket |> assign(:pending_bash, nil) |> put_flash(:error, message)
+  end
+
+  defp describe_bash_error(:agent_running), do: "Eva is working — let the turn finish first."
+  defp describe_bash_error(:bash_running), do: "A command is already running."
+  defp describe_bash_error(reason), do: "Command failed: #{describe(reason)}"
+
+  defp parse_mode("command"), do: :command
+  defp parse_mode("private_command"), do: :private_command
+  defp parse_mode(_mode), do: :prompt
 
   # -- Forks --
 
