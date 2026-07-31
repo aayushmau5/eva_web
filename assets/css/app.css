@@ -519,7 +519,18 @@
 
 .canvas-box--project {
   border: 1px dotted color-mix(in oklch, var(--proto-phosphor), transparent 82%);
+  transition: background-color 120ms, border-color 120ms;
 }
+
+/* The project a held session would land in. Solid rather than dotted, because the whole question
+   while dragging is which box is going to claim it. */
+.canvas-box--project.is-drop-target {
+  border: 1px solid var(--proto-phosphor);
+  background: rgb(143 227 207 / 0.06);
+  box-shadow: inset 0 0 24px rgb(143 227 207 / 0.08);
+}
+
+.canvas-box--project.is-drop-target > .canvas-box__label { color: var(--proto-phosphor) }
 
 .canvas-box__label {
   position: absolute;
@@ -563,7 +574,21 @@
   box-shadow: 0 16px 30px rgb(0 0 0 / 0.6);
 }
 
+/* A session that has just been moved to another project, briefly. Without it a drop that lands on
+   a machine across the canvas — or, in Boring View, into a row you were not looking at — happens
+   without any acknowledgement that it happened at all. */
+.tv-set.is-moved {
+  border-color: var(--proto-phosphor);
+  animation: tv-landed 1.6s ease-out;
+}
+
 /* -- Animations -- */
+
+@keyframes tv-landed {
+  0% { box-shadow: 0 0 0 0 rgb(143 227 207 / 0.55), 0 0 26px 6px rgb(143 227 207 / 0.35) }
+  70% { box-shadow: 0 0 0 10px rgb(143 227 207 / 0), 0 0 18px 2px rgb(143 227 207 / 0.12) }
+  100% { box-shadow: 0 0 0 0 rgb(143 227 207 / 0) }
+}
 
 @keyframes tv-blink { 0%, 49% { opacity: 1 } 50%, 100% { opacity: 0 } }
 

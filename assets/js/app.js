@@ -124,12 +124,14 @@ const Hooks = {
       })
     },
 
-    // The world's transform is set here, not by the server, so every patch of the canvas removes
-    // it — the server's version of that element has no style attribute at all. Reapplying after
-    // each update is what keeps the view from snapping back to the origin every time the demo
-    // ticker changes a session's status.
+    // Everything this hook writes to the DOM is invisible to the server, so every patch of the
+    // canvas undoes it: the world's transform (the server renders no style attribute at all) and
+    // the drag classes (the server renders a fixed class list). Reapplying after each update is
+    // what stops the view snapping back to the origin, and the drop-target highlight vanishing
+    // under the cursor, whenever the demo ticker changes a session's status.
     updated() {
       this.applyCamera()
+      this.paintDrag()
     },
 
     destroyed() {
@@ -235,7 +237,7 @@ const Hooks = {
       if (!this.moved && Math.hypot(dx, dy) > 4) {
         this.moved = true
         if (this.drag) {
-          this.drag.node.classList.add("is-dragging")
+          this.paintDrag()
           this.pushEvent("drag_start", {})
         }
       }
@@ -257,20 +259,21 @@ const Hooks = {
     handleUp() {
       this.el.classList.remove("is-panning")
 
-      if (this.drag) {
-        this.drag.node.classList.remove("is-dragging")
-        if (this.moved) {
-          this.suppressClick = true
-          this.pushEvent("node_moved", {
-            id: this.drag.node.dataset.nodeId,
-            x: Math.round(parseFloat(this.drag.node.style.left)),
-            y: Math.round(parseFloat(this.drag.node.style.top)),
-          })
-          this.pushEvent("drag_end", {})
-        }
+      if (this.drag && this.moved) {
+        this.suppressClick = true
+        this.pushEvent("node_moved", {
+          id: this.drag.node.dataset.nodeId,
+          x: Math.round(parseFloat(this.drag.node.style.left)),
+          y: Math.round(parseFloat(this.drag.node.style.top)),
+        })
+        this.pushEvent("drag_end", {})
       }
+
       this.drag = null
       this.pan = null
+      this.moved = false
+      this.dropTarget = null
+      this.paintDrag()
     },
 
     // -- Redrawing wires and boxes, mirroring EvaWeb.Proto.Layout --
@@ -286,25 +289,35 @@ const Hooks = {
         }
       })
 
+      // Wires follow every node including the one in hand — a wire that let go of its TV mid-drag
+      // would read as the connection being broken.
       this.el.querySelectorAll(".canvas-wire").forEach((path) => {
         const from = nodes[path.dataset.from]
         const to = nodes[path.dataset.to]
         if (from && to) path.setAttribute("d", this.wirePath(from, to))
       })
 
+      // Boxes, on the other hand, are fitted as if the dragged session had already left. Its old
+      // project visibly lets go of it, and the box it is about to land in is the one it is over
+      // rather than one stretched around it. `EvaWeb.Proto.Layout.drop_target/4` excludes the same
+      // node for the same reason, so what you see is what the drop resolves to.
+      const held = this.drag && this.moved ? this.drag.node.dataset.nodeId : null
+      const settled = Object.entries(nodes).filter(([id]) => id !== held)
+
       const projectRects = {}
       this.el.querySelectorAll('[data-box="project"]').forEach((box) => {
         const id = box.dataset.boxId
-        const corners = Object.values(nodes)
-          .filter((n) => n.project === id)
-          .flatMap((n) => [
+        const corners = settled
+          .filter(([, n]) => n.project === id)
+          .flatMap(([, n]) => [
             [n.x, n.y],
             [n.x + this.metrics.nodeW, n.y + this.metrics.nodeH],
           ])
-        if (corners.length === 0) return
-        const rect = this.bounds(corners, this.metrics.projectPad)
-        projectRects[id] = {...rect, machine: this.machineOf(id, nodes)}
-        this.setBox(box, rect)
+        // An emptied project keeps whatever rect the server last gave it, so it stays somewhere you
+        // can drop a session back into.
+        const rect = corners.length ? this.bounds(corners, this.metrics.projectPad) : this.boxRect(box)
+        projectRects[id] = {...rect, machine: box.dataset.machine}
+        if (corners.length) this.setBox(box, rect)
       })
 
       this.el.querySelectorAll('[data-box="machine"]').forEach((box) => {
@@ -318,11 +331,41 @@ const Hooks = {
         if (corners.length === 0) return
         this.setBox(box, this.bounds(corners, this.metrics.machinePad))
       })
+
+      this.highlightTarget(held && nodes[held], held && nodes[held] && nodes[held].project, projectRects)
     },
 
-    machineOf(projectId, nodes) {
-      const node = Object.values(nodes).find((n) => n.project === projectId)
-      return node && node.machine
+    // The box the held session would land in: the smallest one containing its screen's midpoint,
+    // ignoring the project it already belongs to since dropping there changes nothing.
+    highlightTarget(node, ownProject, projectRects) {
+      const x = node ? node.x + this.metrics.nodeW / 2 : null
+      const y = node ? node.y + this.metrics.nodeH * 0.38 : null
+
+      const hit = node
+        ? Object.entries(projectRects)
+            .filter(
+              ([id, r]) =>
+                id !== ownProject && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h,
+            )
+            .sort(([, a], [, b]) => a.w * a.h - b.w * b.h)[0]
+        : null
+
+      this.dropTarget = hit ? hit[0] : null
+      this.paintDrag()
+    },
+
+    // Kept separate from deciding the target so a server patch can restore the classes without
+    // having to recompute anything.
+    paintDrag() {
+      this.el.querySelectorAll('[data-box="project"]').forEach((box) => {
+        box.classList.toggle("is-drop-target", box.dataset.boxId === this.dropTarget)
+      })
+      this.el.querySelectorAll("[data-node-id]").forEach((node) => {
+        node.classList.toggle(
+          "is-dragging",
+          !!this.drag && !!this.moved && node === this.drag.node,
+        )
+      })
     },
 
     bounds(corners, pad) {

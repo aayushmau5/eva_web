@@ -19,6 +19,7 @@ defmodule EvaWebWeb.TVComponents do
   """
   attr :session, :map, required: true
   attr :selected, :boolean, default: false
+  attr :moved, :boolean, default: false
   attr :link_count, :integer, default: 0
   attr :class, :string, default: nil
   attr :rest, :global
@@ -32,7 +33,10 @@ defmodule EvaWebWeb.TVComponents do
       class={["tv-node", @class]}
       {@rest}
     >
-      <div class={["tv-set", @selected && "is-selected"]} data-status={@session.status}>
+      <div
+        class={["tv-set", @selected && "is-selected", @moved && "is-moved"]}
+        data-status={@session.status}
+      >
         <div class="tv-screen">
           <div class="tv-glass">
             <p class="tv-line tv-line--head">
@@ -132,6 +136,7 @@ defmodule EvaWebWeb.TVComponents do
   attr :sessions, :list, required: true
   attr :link_counts, :map, required: true
   attr :selected, :string, default: nil
+  attr :moved, :string, default: nil
 
   def boring_view(assigns) do
     ~H"""
@@ -162,8 +167,17 @@ defmodule EvaWebWeb.TVComponents do
                 :for={session <- sessions_of(@sessions, project.id)}
                 session={session}
                 selected={@selected == session.id}
+                moved={@moved == session.id}
                 link_count={Map.get(@link_counts, session.id, 0)}
               />
+              <%!-- A project can be emptied by dragging its last session onto another machine in
+                    Fun View. The row stays so the move is legible from this side too. --%>
+              <p
+                :if={sessions_of(@sessions, project.id) == []}
+                class="py-6 text-2xs text-zinc-600 italic"
+              >
+                no sessions
+              </p>
             </div>
             <button
               :for={
@@ -199,12 +213,15 @@ defmodule EvaWebWeb.TVComponents do
   """
   attr :sessions, :list, required: true
   attr :positions, :map, required: true
+  attr :empty_rects, :map, default: %{}
   attr :links, :list, required: true
   attr :link_counts, :map, required: true
   attr :selected, :string, default: nil
+  attr :moved, :string, default: nil
 
   def fun_view(assigns) do
-    {project_boxes, machine_boxes} = Layout.boxes(assigns.positions)
+    {project_boxes, machine_boxes} =
+      Layout.boxes(assigns.sessions, assigns.positions, assigns.empty_rects)
 
     assigns =
       assign(assigns,
@@ -261,6 +278,7 @@ defmodule EvaWebWeb.TVComponents do
           class="canvas-box canvas-box--project"
           data-box="project"
           data-box-id={box.id}
+          data-machine={box.machine_id}
           style={box_style(box)}
         >
           <span class="canvas-box__label">{box.name}</span>
@@ -271,6 +289,7 @@ defmodule EvaWebWeb.TVComponents do
           :if={@positions[session.id]}
           session={session}
           selected={@selected == session.id}
+          moved={@moved == session.id}
           link_count={Map.get(@link_counts, session.id, 0)}
           class="tv-node--canvas"
           data-node-id={session.id}
@@ -299,7 +318,7 @@ defmodule EvaWebWeb.TVComponents do
           </button>
         </div>
         <p class="text-3xs text-zinc-600">
-          drag a TV to move it · scroll to zoom · drag the void to pan
+          drop a TV in another project to move it there · scroll to zoom · drag the void to pan
         </p>
       </div>
     </div>

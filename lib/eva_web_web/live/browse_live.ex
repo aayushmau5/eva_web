@@ -42,7 +42,9 @@ defmodule EvaWebWeb.BrowseLive do
        links: links,
        link_counts: link_counts(links),
        positions: Layout.initial_positions(),
+       empty_rects: %{},
        selected: nil,
+       moved: nil,
        dragging?: false
      )}
   end
@@ -65,8 +67,32 @@ defmodule EvaWebWeb.BrowseLive do
     {:noreply, assign(socket, :selected, selected)}
   end
 
+  # A dropped session. If it landed inside another project's box, that is a move: the session now
+  # belongs to that project, and to whichever machine the project is on.
+  #
+  # Dropping into open space is just a move on the canvas — the session keeps its project, whose box
+  # then stretches to reach it. That stretch is the rule made visible, and the way out of it is to
+  # drop the session somewhere that means something.
   def handle_event("node_moved", %{"id" => id, "x" => x, "y" => y}, socket) do
-    {:noreply, update(socket, :positions, &Map.put(&1, id, %{x: x, y: y}))}
+    before = socket.assigns.positions
+    positions = Map.put(before, id, %{x: x, y: y})
+    socket = assign(socket, :positions, positions)
+    session = socket.assigns.sessions[id]
+
+    target =
+      session &&
+        Layout.drop_target(
+          Map.values(socket.assigns.sessions),
+          positions,
+          socket.assigns.empty_rects,
+          id
+        )
+
+    if target && target != session.project_id do
+      {:noreply, reparent(socket, session, target, before)}
+    else
+      {:noreply, socket}
+    end
   end
 
   # The ticker is held off for the duration of a drag. A status change re-renders the whole node
@@ -78,6 +104,10 @@ defmodule EvaWebWeb.BrowseLive do
   def handle_event("drag_end", _params, socket), do: {:noreply, assign(socket, :dragging?, false)}
 
   @impl true
+  def handle_info({:clear_move, id}, socket) do
+    {:noreply, if(socket.assigns.moved == id, do: assign(socket, :moved, nil), else: socket)}
+  end
+
   def handle_info(:tick, %{assigns: %{dragging?: true}} = socket), do: {:noreply, socket}
 
   def handle_info(:tick, socket) do
@@ -116,15 +146,18 @@ defmodule EvaWebWeb.BrowseLive do
           sessions={@ordered}
           link_counts={@link_counts}
           selected={@selected}
+          moved={@moved}
         />
 
         <.fun_view
           :if={@view == :fun}
           sessions={@ordered}
           positions={@positions}
+          empty_rects={@empty_rects}
           links={@links}
           link_counts={@link_counts}
           selected={@selected}
+          moved={@moved}
         />
 
         <.detail_drawer
@@ -141,6 +174,56 @@ defmodule EvaWebWeb.BrowseLive do
   end
 
   # -- Private --
+
+  # How long the landed session stays highlighted. Long enough to find it after it has jumped
+  # across the canvas into another machine, short enough not to become part of the picture.
+  @move_flash_ms 1_600
+
+  defp reparent(socket, session, project_id, positions_before) do
+    project = Enum.find(socket.assigns.projects, &(&1.id == project_id))
+    source = session.project_id
+
+    # Measured before the move is applied, so it is the box as the user last saw it rather than the
+    # nothing that is left once the session has gone.
+    source_rect =
+      Layout.project_rect(
+        source,
+        Map.values(socket.assigns.sessions),
+        positions_before,
+        socket.assigns.empty_rects
+      )
+
+    sessions =
+      Map.put(socket.assigns.sessions, session.id, %{
+        session
+        | project_id: project.id,
+          machine_id: project.machine_id
+      })
+
+    empty_rects =
+      socket.assigns.empty_rects
+      # The target just gained a session, so it has real bounds again and no longer needs a
+      # remembered rect; the source keeps one only if that was its last session.
+      |> Map.delete(project.id)
+      |> remember(source, source_rect, sessions)
+
+    Process.send_after(self(), {:clear_move, session.id}, @move_flash_ms)
+
+    socket
+    |> assign(:sessions, sessions)
+    |> assign(:empty_rects, empty_rects)
+    |> assign(:moved, session.id)
+  end
+
+  defp remember(rects, project_id, rect, sessions) do
+    emptied? = not Enum.any?(Map.values(sessions), &(&1.project_id == project_id))
+
+    if emptied? and is_map(rect) do
+      Map.put(rects, project_id, Layout.at_least_one_node(rect))
+    else
+      rects
+    end
+  end
 
   defp status_counts(sessions) do
     sessions |> Map.values() |> Enum.frequencies_by(& &1.status)

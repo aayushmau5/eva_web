@@ -58,20 +58,26 @@ defmodule EvaWeb.Proto.Layout do
   end
 
   @doc """
-  Boundary boxes for the given positions, as `{project_boxes, machine_boxes}`.
+  Boundary boxes for the given sessions and positions, as `{project_boxes, machine_boxes}`.
 
-  Recomputed from scratch on every render rather than stored, so a box can never disagree with
-  where its sessions actually are.
+  Derived rather than stored, so a box can never disagree with where its sessions actually are —
+  which is also what makes a box a meaningful drop target: dropping a session inside one is the
+  same statement as the box being drawn around it.
+
+  `remembered` is the exception, and only covers projects that have been emptied by dragging their
+  last session away. A project with nothing in it has no bounds to compute, and a box that vanished
+  is a box you can never put anything back into, so its last rect is kept as a landing pad. See
+  `EvaWebWeb.BrowseLive`.
   """
-  @spec boxes(%{String.t() => %{x: number(), y: number()}}) :: {[map()], [map()]}
-  def boxes(positions) do
+  @spec boxes([map()], %{String.t() => %{x: number(), y: number()}}, %{String.t() => map()}) ::
+          {[map()], [map()]}
+  def boxes(sessions, positions, remembered \\ %{}) do
     project_boxes =
       for project <- Fixtures.projects(),
-          points = session_points(project.id, positions),
-          points != [] do
+          rect = project_rect(project.id, sessions, positions, remembered) do
         project
         |> Map.take([:id, :name, :path, :machine_id])
-        |> Map.merge(bounds(points, @project_pad))
+        |> Map.merge(rect)
       end
 
     machine_boxes =
@@ -89,6 +95,75 @@ defmodule EvaWeb.Proto.Layout do
       end
 
     {project_boxes, machine_boxes}
+  end
+
+  @doc """
+  The rect a project's box occupies, or nil when it has no sessions and none is remembered.
+  """
+  @spec project_rect(String.t(), [map()], %{String.t() => map()}, %{String.t() => map()}) ::
+          map() | nil
+  def project_rect(project_id, sessions, positions, remembered \\ %{}) do
+    points =
+      sessions
+      |> Enum.filter(&(&1.project_id == project_id))
+      |> Enum.flat_map(fn session ->
+        case positions[session.id] do
+          nil -> []
+          pos -> [{pos.x, pos.y}, {pos.x + @node_w, pos.y + @node_h}]
+        end
+      end)
+
+    case points do
+      [] -> remembered[project_id]
+      points -> bounds(points, @project_pad)
+    end
+  end
+
+  @doc """
+  The project box a dropped session landed in, or nil if it was dropped in open space.
+
+  The session being dropped is excluded from the boxes it is tested against. Without that its own
+  project's box would have stretched to follow it during the drag, and every drop would resolve to
+  "it is still where it was". The smallest containing box wins, since boxes can overlap once things
+  have been dragged around and the tighter one is the more specific claim.
+  """
+  @spec drop_target([map()], %{String.t() => map()}, %{String.t() => map()}, String.t()) ::
+          String.t() | nil
+  def drop_target(sessions, positions, remembered, session_id) do
+    case positions[session_id] do
+      nil ->
+        nil
+
+      pos ->
+        {x, y} = anchor(pos)
+        others = Enum.reject(sessions, &(&1.id == session_id))
+        {project_boxes, _machine_boxes} = boxes(others, positions, remembered)
+
+        project_boxes
+        |> Enum.filter(&(x >= &1.x and x <= &1.x + &1.w and y >= &1.y and y <= &1.y + &1.h))
+        |> Enum.sort_by(&(&1.w * &1.h))
+        |> case do
+          [box | _rest] -> box.id
+          [] -> nil
+        end
+    end
+  end
+
+  @doc """
+  The point on a node that decides which box it was dropped into: the middle of the screen, not of
+  the node, since the node's lower third is its title and you aim with the picture.
+  """
+  @spec anchor(%{x: number(), y: number()}) :: {number(), number()}
+  def anchor(pos), do: {pos.x + @node_w / 2, pos.y + @node_h * 0.38}
+
+  @doc "Grows a rect to at least one node plus padding, so an emptied box stays big enough to aim at."
+  @spec at_least_one_node(map()) :: map()
+  def at_least_one_node(rect) do
+    %{
+      rect
+      | w: max(rect.w, @node_w + @project_pad * 2),
+        h: max(rect.h, @node_h + @project_pad * 2)
+    }
   end
 
   @doc """
@@ -134,19 +209,6 @@ defmodule EvaWeb.Proto.Layout do
       w: Enum.max(xs) - Enum.min(xs) + pad * 2,
       h: Enum.max(ys) - Enum.min(ys) + pad * 2
     }
-  end
-
-  # Both corners of every session in the project, so `bounds/2` sees the node's extent and not just
-  # its top-left origin.
-  defp session_points(project_id, positions) do
-    project_id
-    |> sessions_of()
-    |> Enum.flat_map(fn session ->
-      case positions[session.id] do
-        nil -> []
-        pos -> [{pos.x, pos.y}, {pos.x + @node_w, pos.y + @node_h}]
-      end
-    end)
   end
 
   defp machine_origins([first | rest], sizes) do
