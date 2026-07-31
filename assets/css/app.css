@@ -218,4 +218,385 @@
 .md th, .md td { padding: 0.25rem 0.5rem; border: 1px solid var(--color-zinc-800); text-align: left }
 .md th { color: var(--color-zinc-200); font-weight: 600 }
 
+/* ==========================================================================
+   Session browser prototype — EvaWebWeb.BrowseLive
+   ==========================================================================
+   Scoped under `.proto` so none of it reaches the chat UI. The palette is the dark teal of the
+   wireframe rather than the chat's zinc, because a room full of glowing screens needs a ground
+   that is a colour and not just "dark".
+
+   Delete this block and `lib/eva_web/proto/` together if the prototype doesn't earn its place. */
+
+.proto {
+  --proto-bg: #062023;
+  --proto-panel: #08292c;
+  --proto-line: #16474a;
+  --proto-phosphor: #8fe3cf;
+  --proto-bezel-a: #123a3d;
+  --proto-bezel-b: #0b2c2f;
+  --proto-bezel-edge: #1e5457;
+}
+
+/* One variable per status, read by the lamp, the screen tint and the legend alike, so a status can
+   never be one colour in one place and another elsewhere. */
+.proto [data-status="working"] { --led: #34d399 }
+.proto [data-status="awaiting"] { --led: #fbbf24 }
+.proto [data-status="failed"] { --led: #f87171 }
+.proto [data-status="idle"] { --led: #2f5254 }
+
+/* -- The television -- */
+
+.tv-node {
+  display: flex;
+  width: 176px;
+  flex-direction: column;
+  gap: 0.375rem;
+  flex: none;
+  text-align: left;
+}
+
+.tv-node--canvas { position: absolute }
+
+.tv-set {
+  position: relative;
+  padding: 0.5rem 0.5rem 0;
+  border: 1px solid var(--proto-bezel-edge);
+  border-radius: 0.625rem;
+  background: linear-gradient(160deg, var(--proto-bezel-a), var(--proto-bezel-b));
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.06),
+    inset 0 -2px 6px rgb(0 0 0 / 0.5),
+    0 6px 14px rgb(0 0 0 / 0.45);
+  transition: box-shadow 150ms, border-color 150ms, transform 150ms;
+}
+
+.tv-node:hover .tv-set { transform: translateY(-2px) }
+
+.tv-set.is-selected {
+  border-color: var(--proto-phosphor);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.06),
+    0 0 0 1px rgb(143 227 207 / 0.4),
+    0 8px 22px rgb(0 0 0 / 0.55);
+}
+
+/* The tube. Asymmetric radii are what sell it as glass rather than a rounded rectangle: the corners
+   read as a curved surface clipped by the bezel. */
+.tv-screen {
+  position: relative;
+  height: 92px;
+  overflow: hidden;
+  border-radius: 1.125rem / 1.625rem;
+  background: radial-gradient(115% 130% at 50% 40%, #0a2f2c 0%, #041718 68%, #020d0e 100%);
+  box-shadow:
+    inset 0 0 18px rgb(0 0 0 / 0.85),
+    inset 0 0 3px rgb(143 227 207 / 0.18);
+}
+
+.tv-glass {
+  position: absolute;
+  inset: 0;
+  padding: 0.4375rem 0.5rem;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: var(--text-4xs);
+  line-height: 1.55;
+  color: var(--proto-phosphor);
+  text-shadow: 0 0 5px currentColor;
+}
+
+.tv-line {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  opacity: 0.85;
+}
+
+.tv-line--head {
+  margin-bottom: 0.125rem;
+  color: var(--led);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 1;
+}
+
+.tv-caret { animation: tv-blink 1.1s steps(1) infinite }
+
+/* An idle set is a set that is switched off — no glow, no colour on the head line. This is what
+   makes a wall of TVs readable: the handful that are doing something are the only lit ones. */
+.tv-set[data-status="idle"] .tv-glass {
+  color: #4c7573;
+  text-shadow: none;
+}
+.tv-set[data-status="idle"] .tv-line--head { color: #416260 }
+.tv-set[data-status="idle"] .tv-screen { box-shadow: inset 0 0 18px rgb(0 0 0 / 0.85) }
+.tv-set[data-status="working"] .tv-glass { animation: tv-flicker 4.5s infinite }
+
+.tv-scan {
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgb(0 0 0 / 0.28) 0px,
+    rgb(0 0 0 / 0.28) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  mix-blend-mode: multiply;
+}
+
+/* Vignette plus a single soft highlight in the top-left, i.e. the room's window reflected in the
+   glass. Without it the screen reads as a flat panel. */
+.tv-glare {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(60% 40% at 22% 12%, rgb(255 255 255 / 0.07), transparent 70%),
+    radial-gradient(120% 120% at 50% 50%, transparent 55%, rgb(0 0 0 / 0.55) 100%);
+}
+
+.tv-chin {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem 0.125rem 0.4375rem;
+}
+
+.tv-grille {
+  height: 7px;
+  width: 34px;
+  border-radius: 1px;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgb(255 255 255 / 0.14) 0px,
+    rgb(255 255 255 / 0.14) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
+
+.tv-led,
+.legend-led {
+  height: 7px;
+  width: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--led);
+  box-shadow: 0 0 5px var(--led), 0 0 11px color-mix(in oklch, var(--led), transparent 45%);
+}
+
+.tv-led { margin-left: auto }
+
+.proto [data-status="idle"] .tv-led,
+.proto .legend-led[data-status="idle"] {
+  box-shadow: inset 0 1px 1px rgb(0 0 0 / 0.6);
+}
+
+.tv-set[data-status="working"] .tv-led { animation: led-pulse 1.6s ease-in-out infinite }
+.tv-set[data-status="awaiting"] .tv-led { animation: led-blink 1.8s ease-in-out infinite }
+.tv-set[data-status="failed"] .tv-led { animation: led-throb 2.6s ease-in-out infinite }
+
+/* The wireframe's dangling cable: a session with links has something plugged into it, visible
+   without having to switch to the canvas. */
+.tv-wire {
+  position: absolute;
+  right: -14px;
+  bottom: -26px;
+  height: 34px;
+  width: 30px;
+  fill: none;
+  stroke: var(--proto-line);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+
+.tv-links {
+  position: absolute;
+  right: -7px;
+  bottom: -7px;
+  min-width: 15px;
+  padding: 0 0.1875rem;
+  border: 1px solid var(--proto-line);
+  border-radius: 999px;
+  background: var(--proto-bg);
+  font-family: var(--font-mono);
+  font-size: var(--text-4xs);
+  line-height: 14px;
+  text-align: center;
+  color: #6f9c99;
+}
+
+.tv-title {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-size: var(--text-3xs);
+  line-height: 1.35;
+  color: #a7c2bf;
+}
+
+.tv-node:hover .tv-title { color: var(--proto-phosphor) }
+
+.tv-transcript {
+  padding: 0.5rem;
+  border: 1px solid var(--proto-line);
+  background: #041718;
+  font-family: var(--font-mono);
+  font-size: var(--text-3xs);
+  line-height: 1.6;
+  color: var(--proto-phosphor);
+  white-space: pre-wrap;
+}
+
+/* -- Boring View -- */
+
+.tv-row {
+  display: flex;
+  gap: 1.25rem;
+  overflow-x: auto;
+  padding: 0.375rem 0.25rem 1.75rem;
+  scrollbar-width: thin;
+  scrollbar-color: var(--proto-line) transparent;
+}
+
+/* -- Fun View -- */
+
+.canvas-viewport {
+  background-color: var(--proto-bg);
+  background-image: radial-gradient(circle, #12383a 1px, transparent 1px);
+  background-size: 28px 28px;
+  cursor: grab;
+}
+
+.canvas-viewport.is-panning { cursor: grabbing }
+
+.canvas-world {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+/* Sized 1x1 and allowed to overflow, so world coordinates can be written into the paths directly
+   and can go negative once things have been dragged around. */
+.canvas-wires {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 1px;
+  width: 1px;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.canvas-wire {
+  fill: none;
+  stroke: #2e6b6c;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-dasharray: 1 7;
+  animation: wire-flow 2.4s linear infinite;
+}
+
+.canvas-wire.is-lit {
+  stroke: var(--proto-phosphor);
+  stroke-width: 2.5;
+  filter: drop-shadow(0 0 4px rgb(143 227 207 / 0.6));
+}
+
+.canvas-box {
+  position: absolute;
+  pointer-events: none;
+  border-radius: 0.25rem;
+}
+
+.canvas-box--machine {
+  border: 1px dashed color-mix(in oklch, var(--proto-phosphor), transparent 72%);
+  background: rgb(143 227 207 / 0.015);
+}
+
+.canvas-box--project {
+  border: 1px dotted color-mix(in oklch, var(--proto-phosphor), transparent 82%);
+}
+
+.canvas-box__label {
+  position: absolute;
+  top: -1.375rem;
+  left: 0.125rem;
+  font-family: var(--font-mono);
+  font-size: var(--text-3xs);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #6f9c99;
+  white-space: nowrap;
+}
+
+/* The machine's name sits on the right, as in the wireframe — it labels the container rather than
+   competing with the project labels stacked down the left edge. */
+.canvas-box--machine > .canvas-box__label {
+  left: auto;
+  right: 0.125rem;
+  font-size: var(--text-2xs);
+  color: var(--proto-phosphor);
+}
+
+.canvas-box__meta {
+  position: absolute;
+  top: -1.25rem;
+  right: 0.125rem;
+  transform: translateY(-100%);
+  font-family: var(--font-mono);
+  font-size: var(--text-4xs);
+  color: #4e7472;
+  white-space: nowrap;
+}
+
+.tv-node--canvas.is-dragging {
+  z-index: 20;
+  cursor: grabbing;
+}
+
+.tv-node--canvas.is-dragging .tv-set {
+  transform: scale(1.03);
+  box-shadow: 0 16px 30px rgb(0 0 0 / 0.6);
+}
+
+/* -- Animations -- */
+
+@keyframes tv-blink { 0%, 49% { opacity: 1 } 50%, 100% { opacity: 0 } }
+
+@keyframes tv-flicker {
+  0%, 92%, 100% { opacity: 1 }
+  93% { opacity: 0.82 }
+  94% { opacity: 1 }
+  96% { opacity: 0.88 }
+}
+
+@keyframes led-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 5px var(--led), 0 0 11px var(--led) }
+  50% { opacity: 0.55; box-shadow: 0 0 3px var(--led) }
+}
+
+@keyframes led-blink {
+  0%, 45% { opacity: 1 }
+  55%, 100% { opacity: 0.25 }
+}
+
+@keyframes led-throb {
+  0%, 100% { box-shadow: 0 0 5px var(--led), 0 0 11px var(--led) }
+  50% { box-shadow: 0 0 8px var(--led), 0 0 20px var(--led) }
+}
+
+@keyframes wire-flow { to { stroke-dashoffset: -16 } }
+
+@media (prefers-reduced-motion: reduce) {
+  .proto *,
+  .proto *::before,
+  .proto *::after {
+    animation: none !important;
+  }
+}
+
 /* This file is for your main application CSS */

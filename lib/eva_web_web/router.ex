@@ -19,6 +19,10 @@ defmodule EvaWebWeb.Router do
 
     live "/", ChatLive, :index
     live "/sessions/:id", ChatLive, :show
+
+    # Prototype of the multi-machine session browser. Deliberately off to the side: the chat UI at
+    # "/" is untouched by it.
+    live "/browse", BrowseLive, :index
   end
 
   # Other scopes may use custom stacks.

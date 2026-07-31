@@ -24,8 +24,346 @@ import {LiveSocket} from "phoenix_live_view"
 import {hooks as colocatedHooks} from "phoenix-colocated/eva_web"
 import topbar from "../vendor/topbar"
 
+// Pan/zoom survives the hook being torn down and rebuilt, which is what switching to Boring View
+// and back does. Losing your place on the canvas every time you glance at the other view would
+// make the toggle unusable.
+let canvasCamera = null
+
 const Hooks = {
   ...colocatedHooks,
+
+  // Horizontal scroller for one project's row of TVs, with arrows that only appear when there is
+  // somewhere to go.
+  ScrollRow: {
+    mounted() {
+      this.scroller = this.el.querySelector("[data-scroller]")
+      this.buttons = [...this.el.querySelectorAll("[data-scroll]")]
+      this.buttons.forEach((button) => {
+        button.addEventListener("click", () => {
+          const dir = Number(button.dataset.scroll)
+          this.scroller.scrollBy({left: dir * this.scroller.clientWidth * 0.8, behavior: "smooth"})
+        })
+      })
+      this.sync = () => this.syncArrows()
+      this.scroller.addEventListener("scroll", this.sync, {passive: true})
+      window.addEventListener("resize", this.sync)
+      this.syncArrows()
+    },
+    updated() {
+      this.syncArrows()
+    },
+    syncArrows() {
+      const max = this.scroller.scrollWidth - this.scroller.clientWidth
+      this.buttons.forEach((button) => {
+        const atEnd = Number(button.dataset.scroll) < 0
+          ? this.scroller.scrollLeft <= 1
+          : this.scroller.scrollLeft >= max - 1
+        button.toggleAttribute("data-hidden", atEnd)
+      })
+    },
+    destroyed() {
+      window.removeEventListener("resize", this.sync)
+    },
+  },
+
+  // The Fun View canvas: one transform on the world for pan/zoom, absolute positions on the nodes
+  // for dragging.
+  //
+  // While a node is dragged, the wires and the boundary boxes are recomputed here rather than
+  // round-tripping to the server — at 60fps that would be a message per frame, and the wire would
+  // visibly lag the TV it is attached to. The server is told once, on drop. The rules below have
+  // to match `EvaWeb.Proto.Layout`; the constants come from it as data attributes so at least the
+  // numbers cannot drift.
+  Canvas: {
+    mounted() {
+      this.world = this.el.querySelector("#canvas-world")
+      this.metrics = {
+        nodeW: Number(this.el.dataset.nodeW),
+        nodeH: Number(this.el.dataset.nodeH),
+        projectPad: Number(this.el.dataset.projectPad),
+        machinePad: Number(this.el.dataset.machinePad),
+        labelGap: Number(this.el.dataset.labelGap),
+      }
+
+      // Note the fresh case *before* applying, since applying is what populates `canvasCamera`.
+      const firstOpen = !canvasCamera
+      this.camera = canvasCamera || {x: 0, y: 0, scale: 1}
+      this.applyCamera()
+      // Deferred a frame so the viewport has been laid out and `fit` measures a real box.
+      if (firstOpen) requestAnimationFrame(() => this.fit())
+
+      this.onDown = (e) => this.handleDown(e)
+      this.onMove = (e) => this.handleMove(e)
+      this.onUp = (e) => this.handleUp(e)
+      this.onWheel = (e) => this.handleWheel(e)
+
+      this.el.addEventListener("mousedown", this.onDown)
+      window.addEventListener("mousemove", this.onMove)
+      window.addEventListener("mouseup", this.onUp)
+      // A button released outside the window never produces a mouseup, which would otherwise leave
+      // the canvas stuck in a drag the user has already finished.
+      window.addEventListener("blur", this.onUp)
+      this.el.addEventListener("wheel", this.onWheel, {passive: false})
+
+      // A drag that ends on a node would otherwise be delivered as a click, i.e. as "select".
+      this.onClick = (e) => {
+        if (this.suppressClick) {
+          e.preventDefault()
+          e.stopPropagation()
+          this.suppressClick = false
+        }
+      }
+      this.el.addEventListener("click", this.onClick, true)
+
+      this.el.querySelectorAll("[data-zoom]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const action = button.dataset.zoom
+          if (action === "fit") this.fit()
+          else this.zoomBy(action === "in" ? 1.2 : 1 / 1.2)
+        })
+      })
+    },
+
+    // The world's transform is set here, not by the server, so every patch of the canvas removes
+    // it — the server's version of that element has no style attribute at all. Reapplying after
+    // each update is what keeps the view from snapping back to the origin every time the demo
+    // ticker changes a session's status.
+    updated() {
+      this.applyCamera()
+    },
+
+    destroyed() {
+      window.removeEventListener("mousemove", this.onMove)
+      window.removeEventListener("mouseup", this.onUp)
+      window.removeEventListener("blur", this.onUp)
+    },
+
+    // -- Camera --
+
+    applyCamera() {
+      const {x, y, scale} = this.camera
+      this.world.style.transform = `translate(${x}px, ${y}px) scale(${scale})`
+      // The dot grid is the viewport's background, so it has to be moved and scaled by hand —
+      // otherwise it stays nailed to the screen and the canvas reads as a fixed page.
+      this.el.style.backgroundSize = `${28 * scale}px ${28 * scale}px`
+      this.el.style.backgroundPosition = `${x}px ${y}px`
+      canvasCamera = {...this.camera}
+    },
+
+    zoomAt(scale, clientX, clientY) {
+      const next = Math.min(2.5, Math.max(0.15, scale))
+      const rect = this.el.getBoundingClientRect()
+      // Keep whatever is under the pointer under the pointer.
+      const px = clientX - rect.left
+      const py = clientY - rect.top
+      const ratio = next / this.camera.scale
+      this.camera.x = px - (px - this.camera.x) * ratio
+      this.camera.y = py - (py - this.camera.y) * ratio
+      this.camera.scale = next
+      this.applyCamera()
+    },
+
+    zoomBy(factor) {
+      const rect = this.el.getBoundingClientRect()
+      this.zoomAt(this.camera.scale * factor, rect.left + rect.width / 2, rect.top + rect.height / 2)
+    },
+
+    fit() {
+      const boxes = [...this.el.querySelectorAll('[data-box="machine"]')]
+      if (boxes.length === 0) return
+      const bounds = boxes.reduce(
+        (acc, box) => {
+          const {x, y, w, h} = this.boxRect(box)
+          return {
+            minX: Math.min(acc.minX, x),
+            minY: Math.min(acc.minY, y - this.metrics.labelGap),
+            maxX: Math.max(acc.maxX, x + w),
+            maxY: Math.max(acc.maxY, y + h),
+          }
+        },
+        {minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity},
+      )
+
+      const pad = 60
+      const rect = this.el.getBoundingClientRect()
+      const scale = Math.min(
+        2.5,
+        Math.min(
+          (rect.width - pad * 2) / (bounds.maxX - bounds.minX),
+          (rect.height - pad * 2) / (bounds.maxY - bounds.minY),
+        ),
+      )
+      this.camera.scale = scale
+      this.camera.x = pad - bounds.minX * scale + (rect.width - pad * 2 - (bounds.maxX - bounds.minX) * scale) / 2
+      this.camera.y = pad - bounds.minY * scale + (rect.height - pad * 2 - (bounds.maxY - bounds.minY) * scale) / 2
+      this.applyCamera()
+    },
+
+    handleWheel(e) {
+      e.preventDefault()
+      // Trackpad pinch arrives as ctrlKey+wheel; both it and a plain wheel mean zoom here, since
+      // the canvas has no scrollable content of its own.
+      const factor = Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015))
+      this.zoomAt(this.camera.scale * factor, e.clientX, e.clientY)
+    },
+
+    // -- Dragging --
+
+    handleDown(e) {
+      if (e.button !== 0) return
+      const node = e.target.closest("[data-node-id]")
+      this.start = {x: e.clientX, y: e.clientY}
+      this.moved = false
+
+      if (node) {
+        this.drag = {
+          node,
+          originX: parseFloat(node.style.left) || 0,
+          originY: parseFloat(node.style.top) || 0,
+        }
+      } else {
+        this.pan = {originX: this.camera.x, originY: this.camera.y}
+        this.el.classList.add("is-panning")
+      }
+    },
+
+    handleMove(e) {
+      if (!this.drag && !this.pan) return
+      const dx = e.clientX - this.start.x
+      const dy = e.clientY - this.start.y
+
+      if (!this.moved && Math.hypot(dx, dy) > 4) {
+        this.moved = true
+        if (this.drag) {
+          this.drag.node.classList.add("is-dragging")
+          this.pushEvent("drag_start", {})
+        }
+      }
+      if (!this.moved) return
+
+      if (this.pan) {
+        this.camera.x = this.pan.originX + dx
+        this.camera.y = this.pan.originY + dy
+        this.applyCamera()
+        return
+      }
+
+      // Pointer movement is in screen pixels; node positions are in world units.
+      this.drag.node.style.left = `${this.drag.originX + dx / this.camera.scale}px`
+      this.drag.node.style.top = `${this.drag.originY + dy / this.camera.scale}px`
+      this.redraw()
+    },
+
+    handleUp() {
+      this.el.classList.remove("is-panning")
+
+      if (this.drag) {
+        this.drag.node.classList.remove("is-dragging")
+        if (this.moved) {
+          this.suppressClick = true
+          this.pushEvent("node_moved", {
+            id: this.drag.node.dataset.nodeId,
+            x: Math.round(parseFloat(this.drag.node.style.left)),
+            y: Math.round(parseFloat(this.drag.node.style.top)),
+          })
+          this.pushEvent("drag_end", {})
+        }
+      }
+      this.drag = null
+      this.pan = null
+    },
+
+    // -- Redrawing wires and boxes, mirroring EvaWeb.Proto.Layout --
+
+    redraw() {
+      const nodes = {}
+      this.el.querySelectorAll("[data-node-id]").forEach((node) => {
+        nodes[node.dataset.nodeId] = {
+          x: parseFloat(node.style.left) || 0,
+          y: parseFloat(node.style.top) || 0,
+          project: node.dataset.project,
+          machine: node.dataset.machine,
+        }
+      })
+
+      this.el.querySelectorAll(".canvas-wire").forEach((path) => {
+        const from = nodes[path.dataset.from]
+        const to = nodes[path.dataset.to]
+        if (from && to) path.setAttribute("d", this.wirePath(from, to))
+      })
+
+      const projectRects = {}
+      this.el.querySelectorAll('[data-box="project"]').forEach((box) => {
+        const id = box.dataset.boxId
+        const corners = Object.values(nodes)
+          .filter((n) => n.project === id)
+          .flatMap((n) => [
+            [n.x, n.y],
+            [n.x + this.metrics.nodeW, n.y + this.metrics.nodeH],
+          ])
+        if (corners.length === 0) return
+        const rect = this.bounds(corners, this.metrics.projectPad)
+        projectRects[id] = {...rect, machine: this.machineOf(id, nodes)}
+        this.setBox(box, rect)
+      })
+
+      this.el.querySelectorAll('[data-box="machine"]').forEach((box) => {
+        const id = box.dataset.boxId
+        const corners = Object.values(projectRects)
+          .filter((r) => r.machine === id)
+          .flatMap((r) => [
+            [r.x, r.y - this.metrics.labelGap],
+            [r.x + r.w, r.y + r.h],
+          ])
+        if (corners.length === 0) return
+        this.setBox(box, this.bounds(corners, this.metrics.machinePad))
+      })
+    },
+
+    machineOf(projectId, nodes) {
+      const node = Object.values(nodes).find((n) => n.project === projectId)
+      return node && node.machine
+    },
+
+    bounds(corners, pad) {
+      const xs = corners.map((c) => c[0])
+      const ys = corners.map((c) => c[1])
+      const minX = Math.min(...xs)
+      const minY = Math.min(...ys)
+      return {
+        x: minX - pad,
+        y: minY - pad,
+        w: Math.max(...xs) - minX + pad * 2,
+        h: Math.max(...ys) - minY + pad * 2,
+      }
+    },
+
+    boxRect(box) {
+      return {
+        x: parseFloat(box.style.left) || 0,
+        y: parseFloat(box.style.top) || 0,
+        w: parseFloat(box.style.width) || 0,
+        h: parseFloat(box.style.height) || 0,
+      }
+    },
+
+    setBox(box, {x, y, w, h}) {
+      box.style.left = `${x}px`
+      box.style.top = `${y}px`
+      box.style.width = `${w}px`
+      box.style.height = `${h}px`
+    },
+
+    wirePath(from, to) {
+      const {nodeW, nodeH} = this.metrics
+      const y1 = from.y + nodeH * 0.38
+      const y2 = to.y + nodeH * 0.38
+      const x1 = to.x >= from.x ? from.x + nodeW : from.x
+      const x2 = to.x >= from.x ? to.x : to.x + nodeW
+      const bow = Math.max(60, Math.abs(x2 - x1) * 0.45)
+      return `M ${x1} ${y1} C ${x1 + bow} ${y1}, ${x2 - bow} ${y2}, ${x2} ${y2}`
+    },
+  },
 
   // Follows the stream only while the reader is already at the bottom. Scrolling up to read
   // earlier output has to win over incoming deltas, otherwise every token drags the viewport
