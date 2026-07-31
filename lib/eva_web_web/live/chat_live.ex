@@ -46,6 +46,8 @@ defmodule EvaWebWeb.ChatLive do
        last_provider: nil,
        mcp: MCP.empty(),
        show_mcp: false,
+       renaming: false,
+       rename_form: nil,
        settings: Settings.get(),
        show_settings: false,
        fonts: :loading
@@ -279,6 +281,38 @@ defmodule EvaWebWeb.ChatLive do
     end
   end
 
+  def handle_event("start_rename", _params, socket) do
+    current = socket.assigns.session.title || ""
+    {:noreply, assign(socket, renaming: true, rename_form: to_form(%{"name" => current}))}
+  end
+
+  def handle_event("rename_change", %{"name" => name}, socket) do
+    {:noreply, assign(socket, :rename_form, to_form(%{"name" => name}))}
+  end
+
+  def handle_event("save_rename", %{"name" => name}, socket) do
+    name = String.trim(name)
+    session_id = socket.assigns.session_id
+
+    cond do
+      name == "" ->
+        {:noreply, assign(socket, :renaming, false)}
+
+      true ->
+        Sessions.rename(session_id, name)
+
+        {:noreply,
+         socket
+         |> assign(renaming: false, rename_form: nil)
+         |> assign(:session, Sessions.get(session_id))
+         |> assign(page_title: name)}
+    end
+  end
+
+  def handle_event("cancel_rename", _params, socket) do
+    {:noreply, assign(socket, renaming: false, rename_form: nil)}
+  end
+
   # -- Agent events --
 
   @impl true
@@ -465,9 +499,51 @@ defmodule EvaWebWeb.ChatLive do
         <div class="flex min-w-0 flex-1 flex-col">
           <header class="flex h-12 shrink-0 items-center gap-3 border-b border-zinc-800 px-4">
             <%= if @session do %>
-              <span class="truncate text-sm font-medium text-zinc-200">
-                {@session.title || "Untitled session"}
-              </span>
+              <%= if @renaming do %>
+                <.form
+                  for={@rename_form}
+                  id="rename-form"
+                  phx-change="rename_change"
+                  phx-submit="save_rename"
+                  class="flex items-center gap-1.5"
+                >
+                  <input
+                    type="text"
+                    name="name"
+                    value={@rename_form[:name].value}
+                    class="w-48 rounded border border-zinc-700 bg-[#0c0c0c] px-2 py-1 text-sm text-zinc-200 outline-none transition-colors focus:border-zinc-500"
+                    phx-blur="cancel_rename"
+                    autofocus
+                  />
+                  <button
+                    type="submit"
+                    class="shrink-0 text-zinc-500 hover:text-zinc-300 transition-colors"
+                  >
+                    <.icon name="hero-check-mini" class="size-4" />
+                  </button>
+                  <button
+                    type="button"
+                    phx-click="cancel_rename"
+                    class="shrink-0 text-zinc-500 hover:text-zinc-300 transition-colors"
+                  >
+                    <.icon name="hero-x-mark-mini" class="size-4" />
+                  </button>
+                </.form>
+              <% else %>
+                <button
+                  phx-click="start_rename"
+                  class="group flex items-center gap-1.5 min-w-0"
+                  title="Rename session"
+                >
+                  <span class="truncate text-sm font-medium text-zinc-200 group-hover:text-zinc-100 transition-colors">
+                    {@session.title || "Untitled session"}
+                  </span>
+                  <.icon
+                    name="hero-pencil-mini"
+                    class="size-3.5 shrink-0 text-zinc-700 opacity-0 transition-opacity group-hover:opacity-100"
+                  />
+                </button>
+              <% end %>
               <span class="truncate text-xs text-zinc-600" title={@session.cwd}>{@session.cwd}</span>
               <span class="ml-auto flex shrink-0 items-center gap-1.5">
                 <.mcp_indicator mcp={@mcp} open={@show_mcp} />
@@ -594,6 +670,8 @@ defmodule EvaWebWeb.ChatLive do
       monitor_ref: nil,
       page_title: "Eva",
       queued_messages: [],
+      renaming: false,
+      rename_form: nil,
       mcp: MCP.empty(),
       show_mcp: false
     )

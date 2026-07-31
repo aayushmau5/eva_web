@@ -120,6 +120,31 @@ defmodule EvaWeb.Sessions do
     end
   end
 
+  @doc """
+  Renames a session. If the runner is running the change happens through it so the transcript
+  stays consistent; otherwise the index entry is updated directly.
+  """
+  @spec rename(String.t(), String.t()) :: :ok | {:error, String.t()}
+  def rename(session_id, name) do
+    name = String.trim(name)
+
+    if name == "" do
+      {:error, "name must not be blank"}
+    else
+      case whereis(session_id) do
+        pid when is_pid(pid) ->
+          Runner.rename(pid, name)
+          broadcast_index_change()
+
+        nil ->
+          SessionIndexManager.touch_session(manager(), session_id, nil, nil, name)
+          broadcast_index_change()
+      end
+
+      :ok
+    end
+  end
+
   # -- Runners --
 
   @doc "Stops a session's runner if it is running. The transcript on disk is untouched."

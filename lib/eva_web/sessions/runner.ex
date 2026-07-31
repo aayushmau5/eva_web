@@ -59,6 +59,14 @@ defmodule EvaWeb.Sessions.Runner do
   def cancel(server), do: GenServer.call(server, :cancel)
 
   @doc """
+  Renames a running session. The title is persisted to the index entry so it outlives the runner.
+  """
+  @spec rename(GenServer.server(), String.t()) :: :ok
+  def rename(server, name) do
+    GenServer.call(server, {:rename_session, name})
+  end
+
+  @doc """
   Switches an MCP server on or off.
 
   `:session` applies to this session only and is recorded in its transcript, so it survives a
@@ -149,6 +157,12 @@ defmodule EvaWeb.Sessions.Runner do
 
   # Eva answers with the new server list, so the refreshed state goes out from here rather than
   # waiting on a client event — switching a server *off* produces no events at all.
+  def handle_call({:rename_session, name}, _from, state) do
+    _name = CodingSession.rename_session(state.session_pid, name)
+    Sessions.broadcast_index_change()
+    {:reply, :ok, state}
+  end
+
   def handle_call({:set_mcp_enabled, name, enabled?, scope}, _from, state) do
     case CodingSession.set_mcp_enabled(state.session_pid, name, enabled?, scope) do
       {:ok, infos} -> {:reply, :ok, publish_mcp(state, MCP.refresh(state.mcp, infos))}
