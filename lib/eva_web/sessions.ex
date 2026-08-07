@@ -205,7 +205,7 @@ defmodule EvaWeb.Sessions do
            %{
              messages: [struct()],
              running?: boolean(),
-             mcp: EvaWeb.Sessions.MCP.t(),
+             extensions: EvaWeb.Sessions.Extensions.t(),
              ledger: EvaWeb.Sessions.Ledger.t()
            }}
           | {:error, term()}
@@ -289,15 +289,40 @@ defmodule EvaWeb.Sessions do
   end
 
   @doc """
-  Switches an MCP server on or off for a session, or for every session to come.
+  Switches an extension on or off for one session.
 
-  See `EvaWeb.Sessions.Runner.set_mcp_enabled/4` for what the two scopes mean. Returns
-  `{:error, reason}` rather than raising if the runner has gone away in between.
+  See `EvaWeb.Sessions.Runner.set_extension_enabled/3`. Eva refuses while the agent is running,
+  which comes back as `{:error, :agent_running}`.
   """
-  @spec set_mcp_enabled(String.t(), String.t(), boolean(), :session | :persist) ::
-          :ok | {:error, term()}
-  def set_mcp_enabled(session_id, name, enabled?, scope) do
-    Runner.set_mcp_enabled(via(session_id), name, enabled?, scope)
+  @spec set_extension_enabled(String.t(), String.t(), boolean()) :: :ok | {:error, term()}
+  def set_extension_enabled(session_id, name, enabled?) do
+    Runner.set_extension_enabled(via(session_id), name, enabled?)
+  catch
+    :exit, reason -> {:error, reason}
+  end
+
+  @doc """
+  Recompiles a session's extensions from disk, answering with whatever failed to load.
+
+  The compiled modules are cached for the life of the VM, so this is the only way an edit takes
+  effect without starting a new session. Also refused mid-turn.
+  """
+  @spec reload_extensions(String.t()) :: {:ok, [String.t()]} | {:error, term()}
+  def reload_extensions(session_id) do
+    Runner.reload_extensions(via(session_id))
+  catch
+    :exit, reason -> {:error, reason}
+  end
+
+  @doc """
+  Approves the project extension directories a session is holding back, and loads them.
+
+  See `EvaWeb.Sessions.Runner.trust_extensions/1`. Answers with the directories approved, `[]` when
+  there was nothing waiting, and is refused mid-turn like a reload.
+  """
+  @spec trust_extensions(String.t()) :: {:ok, [String.t()]} | {:error, term()}
+  def trust_extensions(session_id) do
+    Runner.trust_extensions(via(session_id))
   catch
     :exit, reason -> {:error, reason}
   end

@@ -8,9 +8,10 @@ defmodule EvaWeb.Sessions.Runner do
   can attach and detach freely. It also answers `:snapshot`, which is how a view that attaches
   mid-conversation catches up.
 
-  MCP events arrive on the same channel and get the same treatment, but they are also folded into
-  `EvaWeb.Sessions.MCP` state here rather than in each view: an MCP server announces itself once,
-  and a LiveView that reconnects after that would otherwise never learn the server exists.
+  Extensions are held here rather than in each view, for the same reason: a LiveView that connects
+  late would otherwise have no way to learn what the session loaded. They announce nothing, so
+  there is no stream to fold — the set changes only when someone toggles, reloads or approves one,
+  and it is re-read and published whole at each of those points.
   """
 
   # :temporary because the usual reason a Runner dies is an unreadable transcript or an Eva-side
@@ -20,16 +21,16 @@ defmodule EvaWeb.Sessions.Runner do
 
   require Logger
 
-  alias Eva.Agent.Events
-  alias Eva.Agent.Messages
+  alias Eva.Core.Agent.Events
+  alias Eva.Core.Agent.Messages
   alias Eva.Agent.Session.Storage
   alias Eva.Coding.Session, as: CodingSession
   alias Eva.Coding.Session.SessionConfig
   alias Eva.Coding.SessionIndexManager
   alias EvaWeb.Providers
   alias EvaWeb.Sessions
+  alias EvaWeb.Sessions.Extensions
   alias EvaWeb.Sessions.Ledger
-  alias EvaWeb.Sessions.MCP
 
   # Eva's naming Task can finish after the agent run does; re-check once so the sidebar picks the
   # generated title up without a manual refresh.
@@ -49,7 +50,7 @@ defmodule EvaWeb.Sessions.Runner do
   @spec snapshot(GenServer.server()) :: %{
           messages: [struct()],
           running?: boolean(),
-          mcp: MCP.t(),
+          extensions: Extensions.t(),
           ledger: Ledger.t(),
           command: String.t() | nil
         }
@@ -103,16 +104,42 @@ defmodule EvaWeb.Sessions.Runner do
   end
 
   @doc """
-  Switches an MCP server on or off.
+  Switches an extension on or off for this session, recorded in its transcript so it survives a
+  resume.
 
-  `:session` applies to this session only and is recorded in its transcript, so it survives a
-  resume. `:persist` writes `enabled` back to the `mcp.json` the server came from, which every
-  *new* session then picks up — sessions already open keep what they have.
+  Switching one off stops its process; switching one on compiles the file and runs its `setup/1`,
+  because a disabled extension was never loaded in the first place. Eva refuses both while the
+  agent is running — the loop is holding the hook functions the extension's process backs, and an
+  unreachable hook reads as a block.
   """
-  @spec set_mcp_enabled(GenServer.server(), String.t(), boolean(), :session | :persist) ::
-          :ok | {:error, term()}
-  def set_mcp_enabled(server, name, enabled?, scope) do
-    GenServer.call(server, {:set_mcp_enabled, name, enabled?, scope})
+  @spec set_extension_enabled(GenServer.server(), String.t(), boolean()) :: :ok | {:error, term()}
+  def set_extension_enabled(server, name, enabled?) do
+    GenServer.call(server, {:set_extension_enabled, name, enabled?}, 30_000)
+  end
+
+  @doc """
+  Re-reads every extension directory and recompiles what it finds.
+
+  This is the only way to pick up an edit: modules are compiled into the VM once and cached for
+  its lifetime, so a changed `.exs` is invisible until the old one is purged. Also refused while
+  the agent is running.
+  """
+  @spec reload_extensions(GenServer.server()) :: {:ok, [String.t()]} | {:error, term()}
+  def reload_extensions(server) do
+    GenServer.call(server, :reload_extensions, 30_000)
+  end
+
+  @doc """
+  Approves the extension directories this session skipped, and loads them.
+
+  A project's `.eva/extensions` is whatever the repository ships, and it runs before the first
+  prompt — so Eva holds it back until someone says yes. Consent covers the directory as it stands
+  now: editing an extension asks again. Answers with the directories approved, `[]` when there was
+  nothing waiting, and refuses mid-turn, since approving is a reload.
+  """
+  @spec trust_extensions(GenServer.server()) :: {:ok, [String.t()]} | {:error, term()}
+  def trust_extensions(server) do
+    GenServer.call(server, :trust_extensions, 30_000)
   end
 
   # -- GenServer --
@@ -149,6 +176,7 @@ defmodule EvaWeb.Sessions.Runner do
     %{
       session_id: session_id,
       session_pid: session_pid,
+      cwd: entry.cwd,
       # Timestamps and forks live in the transcript rather than the index, so they are read back
       # off the file itself — see `EvaWeb.Sessions.Ledger`.
       session_path: entry.session_path,
@@ -157,19 +185,24 @@ defmodule EvaWeb.Sessions.Runner do
       # mid-command still shows the row and the button that stops it.
       command: nil,
       titled?: not is_nil(entry.title),
-      # Read after the session has finished starting its clients, so a server that connects
-      # instantly is already `:connected` here rather than only via the event that we're too late
-      # to have received.
-      mcp: MCP.new(entry.cwd, CodingSession.list_mcp_servers(session_pid))
+      # Extensions are loaded synchronously during Eva's own startup, which the `cwd/1` call above
+      # has already waited out — so this reads a finished set rather than an empty one.
+      extensions: read_extensions(entry.cwd, session_pid)
     }
   end
 
+  # Extensions are re-read rather than answered from state. Toggling, reloading and approving all
+  # republish, so state is usually right — but an extension running on its own node joins and
+  # leaves whenever someone starts or stops it, and nothing tells this process when that happens.
+  # The moment a view asks is the freshest answer available.
   @impl true
   def handle_call(:snapshot, _from, state) do
+    state = %{state | extensions: read_extensions(state.cwd, state.session_pid)}
+
     reply = %{
       messages: CodingSession.messages(state.session_pid),
       running?: state.running?,
-      mcp: state.mcp,
+      extensions: state.extensions,
       ledger: Ledger.read(state.session_path),
       command: state.command
     }
@@ -229,17 +262,41 @@ defmodule EvaWeb.Sessions.Runner do
     {:reply, :ok, set_running(state, false)}
   end
 
-  # Eva answers with the new server list, so the refreshed state goes out from here rather than
-  # waiting on a client event — switching a server *off* produces no events at all.
   def handle_call({:rename_session, name}, _from, state) do
     _name = CodingSession.rename_session(state.session_pid, name)
     Sessions.broadcast_index_change()
     {:reply, :ok, state}
   end
 
-  def handle_call({:set_mcp_enabled, name, enabled?, scope}, _from, state) do
-    case CodingSession.set_mcp_enabled(state.session_pid, name, enabled?, scope) do
-      {:ok, infos} -> {:reply, :ok, publish_mcp(state, MCP.refresh(state.mcp, infos))}
+  # Eva answers a toggle with the new list, but not with the commands or the diagnostics that go
+  # with it — and enabling one that won't compile is answered with an error while the rest of the
+  # set stays exactly as it was. Re-reading all three is what keeps the panel honest either way.
+  def handle_call({:set_extension_enabled, name, enabled?}, _from, state) do
+    case CodingSession.set_extension_enabled(state.session_pid, name, enabled?) do
+      {:ok, _infos} -> {:reply, :ok, publish_extensions(state)}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  # Answered with what the panel will show rather than with Eva's own list: a directory waiting for
+  # approval is a diagnostic there too, and reporting it as a problem with the reload would be
+  # counting a question as a failure.
+  def handle_call(:reload_extensions, _from, state) do
+    case CodingSession.reload_extensions(state.session_pid) do
+      {:ok, _diagnostics} ->
+        state = publish_extensions(state)
+        {:reply, {:ok, state.extensions.diagnostics}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  # Approving reloads the set, so the panel is republished either way — including the case where
+  # nothing was waiting, which costs one read and keeps a stale row from surviving a race.
+  def handle_call(:trust_extensions, _from, state) do
+    case CodingSession.trust_extensions(state.session_pid) do
+      {:ok, approved} -> {:reply, {:ok, approved}, publish_extensions(state)}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
@@ -285,28 +342,23 @@ defmodule EvaWeb.Sessions.Runner do
     {:noreply, %{state | command: nil}}
   end
 
-  # -- MCP events --
+  # Eva's session publishes this whenever its set of extensions changes — including when an
+  # extension node joins or leaves, which nothing else here would ever hear about. The event
+  # carries nothing on purpose: re-reading is the answer, and it cannot be stale by the time it
+  # arrives the way a payload could.
+  def handle_info(%Events.ExtensionsChanged{}, state) do
+    {:noreply, publish_extensions(state)}
+  end
 
-  # Views get the derived state, not the event: Eva's session folds these into its own snapshots,
-  # so the server list is the answer and re-reading it is what keeps the two from disagreeing.
-  # The event still carries the wire-level detail Eva doesn't keep — see `MCP.apply_event/2`.
+  # -- Everything else Eva sends --
+
+  # Including `Events.ExtensionEvent`, which is how anything an extension publishes arrives — MCP's
+  # server connected/failed among them, now that MCP is an extension rather than part of Eva. It
+  # is an agent event like any other, even when it came from another node, so it is broadcast
+  # rather than folded into state here.
   def handle_info(event, state) when is_struct(event) do
-    cond do
-      MCP.event?(event) ->
-        mcp =
-          state.mcp
-          |> MCP.apply_event(event)
-          |> MCP.refresh(CodingSession.list_mcp_servers(state.session_pid))
-
-        {:noreply, publish_mcp(state, mcp)}
-
-      agent_event?(event.__struct__) ->
-        broadcast(state, event)
-        {:noreply, state}
-
-      true ->
-        {:noreply, state}
-    end
+    if agent_event?(event.__struct__), do: broadcast(state, event)
+    {:noreply, state}
   end
 
   # -- Housekeeping --
@@ -349,9 +401,25 @@ defmodule EvaWeb.Sessions.Runner do
     Phoenix.PubSub.broadcast(EvaWeb.PubSub, Sessions.topic(state.session_id), {:eva, event})
   end
 
-  defp publish_mcp(state, mcp) do
-    Phoenix.PubSub.broadcast(EvaWeb.PubSub, Sessions.topic(state.session_id), {:mcp, mcp})
-    %{state | mcp: mcp}
+  defp publish_extensions(state) do
+    extensions = read_extensions(state.cwd, state.session_pid)
+
+    Phoenix.PubSub.broadcast(
+      EvaWeb.PubSub,
+      Sessions.topic(state.session_id),
+      {:extensions, extensions}
+    )
+
+    %{state | extensions: extensions}
+  end
+
+  defp read_extensions(cwd, session_pid) do
+    Extensions.new(
+      cwd,
+      CodingSession.list_extensions(session_pid),
+      CodingSession.extension_commands(session_pid),
+      CodingSession.extension_diagnostics(session_pid)
+    )
   end
 
   # Read fresh rather than held in state: fork titles come from the session index, which anything
@@ -362,7 +430,7 @@ defmodule EvaWeb.Sessions.Runner do
   end
 
   defp agent_event?(module) do
-    match?("Elixir.Eva.Agent.Events." <> _, Atom.to_string(module))
+    match?("Elixir.Eva.Core.Agent.Events." <> _, Atom.to_string(module))
   end
 
   # Gives a brand new session a readable name straight away. Eva also names sessions with an LLM

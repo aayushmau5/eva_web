@@ -7,30 +7,50 @@ defmodule EvaWebWeb.ChatComponentsTest do
 
   defp render(text), do: text |> ChatComponents.markdown() |> Phoenix.HTML.safe_to_string()
 
-  defp mcp_server(attrs) do
+  defp extension(attrs \\ %{}) do
     Map.merge(
       %{
-        name: "github",
+        name: "memory",
+        path: "/home/u/.eva/extensions/memory.exs",
         scope: :global,
-        transport: :stdio,
-        target: "npx -y @modelcontextprotocol/server-github",
-        status: :connected,
-        enabled?: true,
-        config_enabled: true,
-        session_enabled: nil,
-        overridden?: false,
-        tools: [],
-        server_version: "1.2.3",
-        protocol_version: "2025-06-18",
-        error: nil,
-        login_command: nil
+        node: nil,
+        module: Eva.Extension.Memory,
+        status: :running,
+        loaded?: true,
+        tool_count: 1,
+        commands: [],
+        hooks: [],
+        event_classes: []
       },
       attrs
     )
   end
 
-  defp mcp_state(servers, diagnostics \\ []),
-    do: %{servers: servers, diagnostics: diagnostics, meta: %{}}
+  # An extension that announced itself from its own node: no file here, no module loaded in this
+  # VM, and its lifetime is the node's rather than the session's.
+  defp node_extension(attrs \\ %{}) do
+    extension(
+      Map.merge(
+        %{
+          name: "mcp",
+          path: nil,
+          scope: :node,
+          node: :"eva_ext_mcp@127.0.0.1",
+          module: nil,
+          tool_count: 12
+        },
+        attrs
+      )
+    )
+  end
+
+  defp extensions_state(extensions, opts \\ []) do
+    %{
+      extensions: extensions,
+      diagnostics: Keyword.get(opts, :diagnostics, []),
+      pending: Keyword.get(opts, :pending, [])
+    }
+  end
 
   describe "markdown/1" do
     test "renders emphasis and lists" do
@@ -106,160 +126,158 @@ defmodule EvaWebWeb.ChatComponentsTest do
     end
   end
 
-  describe "mcp_indicator/1" do
-    test "counts connected servers against configured ones" do
+  describe "extensions_indicator/1" do
+    test "counts what loaded against what was discovered" do
       html =
-        render_component(&ChatComponents.mcp_indicator/1,
-          mcp: mcp_state([mcp_server(%{}), mcp_server(%{name: "exa", status: :failed})])
+        render_component(&ChatComponents.extensions_indicator/1,
+          extensions: extensions_state([extension(), extension(%{name: "off", loaded?: false})])
         )
 
-      assert html =~ "MCP"
+      assert html =~ "EXT"
       assert html =~ "1/2"
     end
 
-    test "stays out of the way when no servers are configured" do
-      assert render_component(&ChatComponents.mcp_indicator/1, mcp: mcp_state([])) =~ ""
-      refute render_component(&ChatComponents.mcp_indicator/1, mcp: mcp_state([])) =~ "mcp-toggle"
+    test "stays out of the way for a session with no extensions" do
+      html =
+        render_component(&ChatComponents.extensions_indicator/1, extensions: extensions_state([]))
+
+      refute html =~ "extensions-toggle"
     end
 
-    test "shows up for a config that failed to parse even with no servers" do
-      html = render_component(&ChatComponents.mcp_indicator/1, mcp: mcp_state([], ["bad json"]))
+    # Both of these are states where the panel is the only thing on screen with anything to say.
+    test "shows up for a load failure even with nothing loaded" do
+      html =
+        render_component(&ChatComponents.extensions_indicator/1,
+          extensions: extensions_state([], diagnostics: ["memory.exs failed to compile"])
+        )
 
-      assert html =~ "mcp-toggle"
+      assert html =~ "extensions-toggle"
+      assert html =~ "bg-red-500"
+    end
+
+    test "shows a directory waiting for approval in amber rather than red" do
+      html =
+        render_component(&ChatComponents.extensions_indicator/1,
+          extensions:
+            extensions_state([],
+              pending: ["/repo/.eva/extensions"],
+              diagnostics: ["/repo/.eva/extensions has extensions that have not been approved"]
+            )
+        )
+
+      assert html =~ "extensions-toggle"
+      assert html =~ "bg-amber-500"
+      refute html =~ "bg-red-500"
     end
   end
 
-  describe "mcp_panel/1" do
+  describe "extensions_panel/1" do
+    defp panel(extensions, opts \\ []) do
+      render_component(&ChatComponents.extensions_panel/1,
+        extensions: extensions,
+        open: true,
+        running: Keyword.get(opts, :running, false)
+      )
+    end
+
     test "renders nothing while closed" do
       html =
-        render_component(&ChatComponents.mcp_panel/1,
-          mcp: mcp_state([mcp_server(%{})]),
+        render_component(&ChatComponents.extensions_panel/1,
+          extensions: extensions_state([extension()]),
           open: false
         )
 
-      refute html =~ "mcp-panel"
+      refute html =~ "extensions-panel"
     end
 
-    test "lists a server with its transport, scope and versions" do
+    test "lists an extension with where it came from and what it contributes" do
       html =
-        render_component(&ChatComponents.mcp_panel/1,
-          mcp: mcp_state([mcp_server(%{})]),
-          open: true
+        panel(
+          extensions_state([
+            extension(%{tool_count: 2, hooks: [:context, :tool_call], event_classes: [:agent]})
+          ])
         )
 
-      assert html =~ "github"
-      assert html =~ "stdio"
+      assert html =~ "memory"
+      assert html =~ "/home/u/.eva/extensions/memory.exs"
       assert html =~ "global"
-      assert html =~ "v1.2.3"
-      assert html =~ "2025-06-18"
-      assert html =~ "connected"
+      assert html =~ "running"
+      assert html =~ "2 tools"
+      assert html =~ "context"
+      assert html =~ "agent events"
     end
 
-    test "lists the tools a server exposes" do
-      tools = [%{name: "create_issue", description: "Opens an issue", input_schema: %{}}]
+    # A switched-off extension has no spec to describe it, so the row is all that is left to switch
+    # it back on with.
+    test "keeps a row for a switched-off extension" do
+      html = panel(extensions_state([extension(%{status: :off, loaded?: false, tool_count: 0})]))
 
-      html =
-        render_component(&ChatComponents.mcp_panel/1,
-          mcp: mcp_state([mcp_server(%{tools: tools})]),
-          open: true
-        )
-
-      assert html =~ "1 tool"
-      assert html =~ "create_issue"
-      assert html =~ "Opens an issue"
-    end
-
-    test "surfaces a failure and the login a server is waiting on" do
-      servers = [
-        mcp_server(%{name: "broken", status: :failed, error: "Executable not found: nope"}),
-        mcp_server(%{name: "remote", status: :needs_auth, login_command: "eva mcp login remote"})
-      ]
-
-      html = render_component(&ChatComponents.mcp_panel/1, mcp: mcp_state(servers), open: true)
-
-      assert html =~ "Executable not found: nope"
-      assert html =~ "eva mcp login remote"
-      assert html =~ "needs login"
-    end
-
-    test "shows config diagnostics and a hint when nothing is configured" do
-      html =
-        render_component(&ChatComponents.mcp_panel/1,
-          mcp: mcp_state([], ["Cannot determine MCP server type for demo"]),
-          open: true
-        )
-
-      assert html =~ "Cannot determine MCP server type for demo"
-      assert html =~ "No MCP servers configured"
-      assert html =~ "mcp.json"
-    end
-
-    test "says so when a connected server exposes nothing" do
-      html =
-        render_component(&ChatComponents.mcp_panel/1,
-          mcp: mcp_state([mcp_server(%{})]),
-          open: true
-        )
-
-      assert html =~ "No tools exposed."
-    end
-  end
-
-  describe "mcp_panel/1 toggles" do
-    defp panel(servers) do
-      render_component(&ChatComponents.mcp_panel/1, mcp: mcp_state(servers), open: true)
-    end
-
-    test "a running server offers to be switched off" do
-      html = panel([mcp_server(%{})])
-
-      assert html =~ ~s|id="mcp-switch-github"|
-      assert html =~ ~s|aria-checked="true"|
-      # The click carries the state being asked for, not the current one.
-      assert html =~ ~s|phx-value-enabled="false"|
-      assert html =~ "Disable github"
-    end
-
-    test "a switched-off server offers to be switched back on" do
-      html =
-        panel([mcp_server(%{status: :disabled, enabled?: false, config_enabled: false})])
-
-      assert html =~ ~s|aria-checked="false"|
-      assert html =~ ~s|phx-value-enabled="true"|
-      assert html =~ "Enable github"
+      assert html =~ "extension-switch-memory"
+      assert html =~ "Switch on"
       assert html =~ "off"
     end
 
-    # Without this the toggle looks permanent, and the user has no way to know their next session
-    # will start with the server back the way the file has it.
-    test "a session override says so and offers to make it permanent" do
-      html =
-        panel([
-          mcp_server(%{
-            status: :disabled,
-            enabled?: false,
-            config_enabled: true,
-            session_enabled: false,
-            overridden?: true
-          })
-        ])
+    test "says which node an extension is running on when there is no file to name" do
+      html = panel(extensions_state([node_extension()]))
 
-      assert html =~ "This session only"
-      assert html =~ "config says on"
-      assert html =~ ~s|id="mcp-persist-github"|
-      # Persisting writes the state the session is actually in.
-      assert html =~ ~s|phx-click="mcp_persist"|
+      assert html =~ "mcp"
+      assert html =~ "node"
+      assert html =~ "eva_ext_mcp@127.0.0.1"
     end
 
-    test "a server following its config offers nothing to save" do
-      refute panel([mcp_server(%{})]) =~ "mcp-persist-github"
+    # Eva would take it out readily enough; putting it back means finding it on disk, and there is
+    # nothing there to find.
+    test "offers no switch for an extension owned by another node" do
+      html = panel(extensions_state([node_extension()]))
+
+      assert html =~ "mix eva.ext.stop mcp"
+      assert html =~ "disabled"
     end
 
-    test "an error from before a server was switched off is not shown as a fault" do
-      html =
-        panel([mcp_server(%{status: :disabled, enabled?: false, error: nil, tools: []})])
+    test "hints at where extensions go when there are none" do
+      html = panel(extensions_state([]))
 
-      refute html =~ "bg-red-950"
+      assert html =~ "No extensions"
+      assert html =~ "~/.eva/extensions/"
+    end
+
+    test "shows what failed to load" do
+      html = panel(extensions_state([], diagnostics: ["memory.exs failed to compile: oops"]))
+
+      assert html =~ "failed to compile: oops"
+    end
+
+    test "reload waits for the turn to finish" do
+      assert panel(extensions_state([extension()]), running: true) =~
+               "Eva is working — reload when the turn ends"
+    end
+  end
+
+  describe "extension_trust/1" do
+    test "names the directory and asks before loading anything from it" do
+      html =
+        render_component(&ChatComponents.extension_trust/1, pending: ["/repo/.eva/extensions"])
+
+      assert html =~ "Waiting for approval"
+      assert html =~ "/repo/.eva/extensions"
+      assert html =~ "extensions-trust-approve"
+      assert html =~ "Approve and load"
+    end
+
+    test "renders nothing when no directory is waiting" do
+      refute render_component(&ChatComponents.extension_trust/1, pending: []) =~
+               "extensions-trust"
+    end
+
+    # Approving is a reload, and Eva refuses a reload mid-turn.
+    test "approving waits for the turn to finish" do
+      html =
+        render_component(&ChatComponents.extension_trust/1,
+          pending: ["/repo/.eva/extensions"],
+          running: true
+        )
+
+      assert html =~ "waits for the turn to end"
     end
   end
 
@@ -285,7 +303,7 @@ defmodule EvaWebWeb.ChatComponentsTest do
           "c1",
           "mcp__x__y",
           %{},
-          %{content: [%Eva.Agent.Messages.TextContent{text: "done"}]},
+          %{content: [%Eva.Core.Agent.Messages.TextContent{text: "done"}]},
           false
         )
 
@@ -299,7 +317,9 @@ defmodule EvaWebWeb.ChatComponentsTest do
   describe "message/1 for user rows" do
     defp user_item(attrs \\ %{}) do
       "m0"
-      |> EvaWeb.Sessions.Transcript.user_item(%Eva.Agent.Messages.UserMessage{content: "hello"})
+      |> EvaWeb.Sessions.Transcript.user_item(%Eva.Core.Agent.Messages.UserMessage{
+        content: "hello"
+      })
       |> Map.merge(attrs)
     end
 
@@ -365,8 +385,8 @@ defmodule EvaWebWeb.ChatComponentsTest do
 
   describe "message/1 for assistant rows" do
     defp assistant_item(attrs \\ %{}) do
-      message = %Eva.Agent.Messages.AssistantMessage{
-        content: [%Eva.Agent.Messages.TextContent{text: "the answer"}]
+      message = %Eva.Core.Agent.Messages.AssistantMessage{
+        content: [%Eva.Core.Agent.Messages.TextContent{text: "the answer"}]
       }
 
       "m1"
@@ -466,7 +486,10 @@ defmodule EvaWebWeb.ChatComponentsTest do
   describe "message/1 for bash rows" do
     defp bash_row(attrs) do
       message =
-        struct!(%Eva.Agent.Messages.BashExecutionMessage{command: "ls", output: "a.ex"}, attrs)
+        struct!(
+          %Eva.Core.Agent.Messages.BashExecutionMessage{command: "ls", output: "a.ex"},
+          attrs
+        )
 
       item = EvaWeb.Sessions.Transcript.bash_finished("m2", message)
 

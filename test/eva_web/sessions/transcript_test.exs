@@ -1,7 +1,7 @@
 defmodule EvaWeb.Sessions.TranscriptTest do
   use ExUnit.Case, async: true
 
-  alias Eva.Agent.Messages
+  alias Eva.Core.Agent.Messages
   alias EvaWeb.Sessions.Transcript
 
   defp text(content), do: %Messages.TextContent{text: content}

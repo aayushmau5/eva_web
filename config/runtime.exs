@@ -39,6 +39,16 @@ end
 # here, so its config/runtime.exs never runs and this app has to supply it.
 config :eva, :opencode_api_key, System.get_env("OPENCODE_API_KEY")
 
+# Extensions that run on their own node — MCP is the first — find Eva through epmd and join over
+# Erlang distribution. Starting distribution is what registers this VM with epmd, and a web app
+# that never starts it is a VM no extension can find: `mix eva.ext.start mcp` would announce to
+# nothing. So it is on here, and `EVA_DISTRIBUTION=false` turns it back off.
+#
+# The boundary is Erlang's own cookie in `~/.erlang.cookie`, so anything running as this user can
+# join — the same set of things that can already read the session transcripts. `Eva.Cluster`
+# narrows it further to the names registered with `mix eva.ext.add`.
+config :eva, distribution: System.get_env("EVA_DISTRIBUTION", "true") == "true"
+
 if config_env() == :dev do
   # Reload browser tabs when matching files change.
   config :eva_web, EvaWebWeb.Endpoint,

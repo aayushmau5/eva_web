@@ -1,7 +1,7 @@
 defmodule EvaWeb.Sessions.LedgerTest do
   use ExUnit.Case, async: true
 
-  alias Eva.Agent.Messages
+  alias Eva.Core.Agent.Messages
   alias Eva.Agent.Session.Entries
   alias Eva.Agent.Session.Storage
   alias EvaWeb.Sessions.Ledger

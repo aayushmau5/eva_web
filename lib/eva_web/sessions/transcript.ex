@@ -9,9 +9,8 @@ defmodule EvaWeb.Sessions.Transcript do
   same row.
   """
 
-  alias Eva.Agent.Messages
+  alias Eva.Core.Agent.Messages
   alias EvaWeb.Sessions.Ledger
-  alias EvaWeb.Sessions.MCP
 
   @type block :: {:text, String.t()} | {:thinking, String.t()}
   @type status :: :running | :ok | :error
@@ -32,7 +31,9 @@ defmodule EvaWeb.Sessions.Transcript do
           entry_id: String.t() | nil,
           forks: [Ledger.fork()],
           origin: :agent | :user,
-          private?: boolean()
+          private?: boolean(),
+          level: :info | :warning | :error | nil,
+          source: String.t() | nil
         }
 
   # `at`, `entry_id` and `forks` come from `EvaWeb.Sessions.Ledger` rather than from the message: a
@@ -56,7 +57,11 @@ defmodule EvaWeb.Sessions.Transcript do
     # Who ran it. A bash row the user typed themselves and one the model called look the same
     # otherwise, and which of the two it was is most of what the row means.
     origin: :agent,
-    private?: false
+    private?: false,
+    # Notes are otherwise all alike — a compaction summary reads the same as an extension shouting
+    # about a failure. These two are what tell them apart, and both are nil for Eva's own notes.
+    level: nil,
+    source: nil
   }
 
   @doc """
@@ -116,6 +121,33 @@ defmodule EvaWeb.Sessions.Transcript do
   @spec user_item(String.t(), Messages.UserMessage.t(), float() | nil) :: item()
   def user_item(id, %Messages.UserMessage{} = message, at \\ nil) do
     %{@base | id: id, kind: :user, text: Messages.UserMessage.text(message), at: at}
+  end
+
+  @doc """
+  Renders a custom message — an extension talking to the user rather than to the model.
+
+  Eva emits these for a `/command`'s reply, for input a hook answered itself, for
+  `API.notify/3` and for `API.send_custom_message/4`. None of them are part of the
+  conversation the model sees and most are never written to disk, so they exist only as the
+  row this builds.
+
+  `custom_type` is carried through as `name` because it is the extension's own label for what
+  it just said, and `send_custom_message/4` lets an extension choose it.
+  """
+  @spec custom_item(String.t(), Messages.CustomMessage.t(), float() | nil) :: item()
+  def custom_item(id, %Messages.CustomMessage{} = message, at \\ nil) do
+    details = message.details || %{}
+
+    %{
+      @base
+      | id: id,
+        kind: :note,
+        name: message.custom_type,
+        text: Messages.CustomMessage.text(message),
+        level: level(details["level"]),
+        source: details["extension"],
+        at: at
+    }
   end
 
   @doc """
@@ -265,7 +297,7 @@ defmodule EvaWeb.Sessions.Transcript do
   end
 
   defp to_item(%Messages.CustomMessage{display: true} = message, index, _args) do
-    [%{@base | id: message_id(index), kind: :note, text: Messages.CustomMessage.text(message)}]
+    [custom_item(message_id(index), message)]
   end
 
   defp to_item(_message, _index, _args), do: []
@@ -273,12 +305,25 @@ defmodule EvaWeb.Sessions.Transcript do
   # MCP tools reach the model as `mcp__<server>__<tool>`, which is what gets persisted. Splitting
   # it here means a replayed row and a live one are attributed identically, with no lookup against
   # a server that may not even be connected any more.
+  #
+  # The prefix is the MCP extension's own doing — `Eva.Extension.MCP.ToolAdapter` builds it, on a
+  # node this VM never loads code from. Reading it off the name is all a transcript can do, and it
+  # is enough: a persisted row has nothing but the name either.
   defp put_tool_name(item, tool_name) do
-    case MCP.source(tool_name) do
+    case mcp_source(tool_name) do
       {server, tool} -> %{item | name: tool, server: server}
       nil -> %{item | name: tool_name}
     end
   end
+
+  defp mcp_source("mcp__" <> rest) do
+    case String.split(rest, "__", parts: 2) do
+      [server, tool] when server != "" and tool != "" -> {server, tool}
+      _other -> nil
+    end
+  end
+
+  defp mcp_source(_name), do: nil
 
   defp tool_call_args(messages) do
     for %Messages.AssistantMessage{} = message <- messages,
@@ -303,6 +348,13 @@ defmodule EvaWeb.Sessions.Transcript do
 
   defp error_message(%Messages.AssistantMessage{stop_reason: :aborted}), do: "Cancelled."
   defp error_message(_message), do: nil
+
+  # `API.notify/3` is the only thing that sets this, so anything else — a command's reply, a
+  # message an extension composed itself — is ordinary and reads as such.
+  defp level("warning"), do: :warning
+  defp level("error"), do: :error
+  defp level("info"), do: :info
+  defp level(_other), do: nil
 
   defp inline(value) when is_binary(value) do
     value

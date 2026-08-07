@@ -13,13 +13,13 @@ defmodule EvaWebWeb.ChatLive do
 
   import EvaWebWeb.ChatComponents
 
-  alias Eva.Agent.Events
-  alias Eva.Agent.Messages
+  alias Eva.Core.Agent.Events
+  alias Eva.Core.Agent.Messages
   alias EvaWeb.Fonts
   alias EvaWeb.Providers
   alias EvaWeb.Sessions
+  alias EvaWeb.Sessions.Extensions
   alias EvaWeb.Sessions.Ledger
-  alias EvaWeb.Sessions.MCP
   alias EvaWeb.Sessions.Transcript
   alias EvaWeb.Settings
 
@@ -46,8 +46,10 @@ defmodule EvaWebWeb.ChatLive do
        queued_messages: [],
        last_model: nil,
        last_provider: nil,
-       mcp: MCP.empty(),
-       show_mcp: false,
+       extensions: Extensions.empty(),
+       # The side panels share one strip, so which one is open is one fact rather than a boolean
+       # each — and only one of them can be.
+       panel: nil,
        renaming: false,
        rename_form: nil,
        user_rows: [],
@@ -313,22 +315,71 @@ defmodule EvaWebWeb.ChatLive do
     {:noreply, assign(socket, :settings, settings)}
   end
 
-  def handle_event("toggle_mcp", _params, socket) do
-    {:noreply, assign(socket, :show_mcp, not socket.assigns.show_mcp)}
+  def handle_event("toggle_panel", %{"panel" => panel}, socket) do
+    panel = parse_panel(panel)
+    {:noreply, assign(socket, :panel, if(socket.assigns.panel == panel, do: nil, else: panel))}
   end
 
-  def handle_event("close_mcp", _params, socket) do
-    {:noreply, assign(socket, :show_mcp, false)}
+  def handle_event("close_panel", _params, socket) do
+    {:noreply, assign(socket, :panel, nil)}
   end
 
-  # The runner publishes the new state to everyone on the session, this view included, so there is
-  # nothing to assign here beyond reporting a refusal.
-  def handle_event("mcp_set_enabled", %{"name" => name, "enabled" => enabled}, socket) do
-    {:noreply, set_mcp_enabled(socket, name, enabled == "true", :session)}
+  # The runner publishes the new set to every view on the session, this one included, so the only
+  # thing to do here is report a refusal.
+  def handle_event("extension_set_enabled", %{"name" => name, "enabled" => enabled}, socket) do
+    {:noreply, set_extension_enabled(socket, name, enabled == "true")}
   end
 
-  def handle_event("mcp_persist", %{"name" => name, "enabled" => enabled}, socket) do
-    {:noreply, set_mcp_enabled(socket, name, enabled == "true", :persist)}
+  def handle_event("reload_extensions", _params, %{assigns: %{session_id: nil}} = socket) do
+    {:noreply, socket}
+  end
+
+  def handle_event("reload_extensions", _params, socket) do
+    case Sessions.reload_extensions(socket.assigns.session_id) do
+      {:ok, []} ->
+        {:noreply, put_flash(socket, :info, "Extensions reloaded.")}
+
+      # The reload still happened — these are the files that didn't survive it, and the panel is
+      # already showing them in full. Saying how many is enough to send the reader there.
+      {:ok, diagnostics} ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Reloaded, with #{length(diagnostics)} problem(s) — see the extensions panel."
+         )}
+
+      {:error, reason} ->
+        {:noreply,
+         put_flash(socket, :error, "Could not reload: #{describe_extension_error(reason)}")}
+    end
+  end
+
+  def handle_event("trust_extensions", _params, %{assigns: %{session_id: nil}} = socket) do
+    {:noreply, socket}
+  end
+
+  # Approving loads what was being held back, which is a reload — so the same refusals apply, and
+  # the panel is republished by the runner either way.
+  def handle_event("trust_extensions", _params, socket) do
+    case Sessions.trust_extensions(socket.assigns.session_id) do
+      {:ok, []} ->
+        {:noreply, put_flash(socket, :info, "Nothing was waiting for approval.")}
+
+      {:ok, approved} ->
+        {:noreply,
+         put_flash(socket, :info, "Approved #{length(approved)} directory(s) and loaded them.")}
+
+      {:error, reason} ->
+        {:noreply,
+         put_flash(socket, :error, "Could not approve: #{describe_extension_error(reason)}")}
+    end
+  end
+
+  # A command may take arguments, so this lands in the composer rather than running: what the user
+  # sends is still theirs to edit, and `/name` goes to Eva as an ordinary prompt either way.
+  def handle_event("use_command", %{"text" => text}, socket) do
+    {:noreply, socket |> assign(:panel, nil) |> push_event("chat:fill", %{text: text})}
   end
 
   def handle_event("confirm_delete", %{"id" => session_id}, socket) do
@@ -539,12 +590,27 @@ defmodule EvaWebWeb.ChatLive do
      |> flush_deferred()}
   end
 
+  # An extension talking to the user: a `/command`'s reply, input a hook answered itself, or a
+  # notice. None of it is in the transcript on disk, so the row exists only for as long as the view
+  # does — and only `MessageEnd` is taken, since the two events carry the same finished message.
+  def handle_info(
+        {:eva, %Events.MessageEnd{message: %Messages.CustomMessage{display: true} = message}},
+        socket
+      ) do
+    {id, socket} = next_id(socket)
+
+    {:noreply,
+     stream_insert(socket, :messages, Transcript.custom_item(id, message, Transcript.now()))}
+  end
+
   # Tool results arrive again as messages; the tool row above already shows them.
   def handle_info({:eva, _event}, socket), do: {:noreply, socket}
 
-  # The runner derives MCP state from Eva's own server list and publishes it whole, so there is
-  # nothing to fold here — and every view watching the session sees the same thing after a toggle.
-  def handle_info({:mcp, mcp}, socket), do: {:noreply, assign(socket, :mcp, mcp)}
+  # Extensions only change when someone toggles or reloads one, and the runner re-reads the whole
+  # set at both points — so this is the same deal: assign what it published.
+  def handle_info({:extensions, extensions}, socket) do
+    {:noreply, assign(socket, :extensions, extensions)}
+  end
 
   # Fork state is derived from the transcript on disk, so it lands a beat behind the message it
   # belongs to, and again whenever a fork is taken from this session in any window.
@@ -677,7 +743,7 @@ defmodule EvaWebWeb.ChatLive do
               <% end %>
               <span class="truncate text-xs text-zinc-600" title={@session.cwd}>{@session.cwd}</span>
               <span class="ml-auto flex shrink-0 items-center gap-1.5">
-                <.mcp_indicator mcp={@mcp} open={@show_mcp} />
+                <.extensions_indicator extensions={@extensions} open={@panel == :extensions} />
                 <span
                   :if={Providers.label(@session.provider_name)}
                   class="border border-zinc-800 px-2 py-0.5 text-3xs text-zinc-600"
@@ -744,7 +810,11 @@ defmodule EvaWebWeb.ChatLive do
           />
         </div>
 
-        <.mcp_panel mcp={@mcp} open={@show_mcp and not is_nil(@session_id)} />
+        <.extensions_panel
+          extensions={@extensions}
+          open={@panel == :extensions and not is_nil(@session_id)}
+          running={@running?}
+        />
       </div>
 
       <.delete_modal session={@pending_delete} />
@@ -759,7 +829,7 @@ defmodule EvaWebWeb.ChatLive do
     socket = close_session(socket)
 
     with {:ok, pid} <- Sessions.ensure_started(session_id),
-         {:ok, %{messages: messages, running?: running?, mcp: mcp, ledger: ledger} = snapshot} <-
+         {:ok, %{messages: messages, running?: running?, ledger: ledger} = snapshot} <-
            Sessions.snapshot(session_id) do
       Sessions.subscribe(session_id)
       items = Transcript.to_items(messages, ledger)
@@ -781,7 +851,7 @@ defmodule EvaWebWeb.ChatLive do
         tool_args: tool_args(messages),
         monitor_ref: Process.monitor(pid),
         page_title: session.title || "Eva",
-        mcp: mcp,
+        extensions: snapshot.extensions,
         user_rows: user_rows
       )
       |> assign_sessions()
@@ -818,8 +888,8 @@ defmodule EvaWebWeb.ChatLive do
       queued_messages: [],
       renaming: false,
       rename_form: nil,
-      mcp: MCP.empty(),
-      show_mcp: false,
+      extensions: Extensions.empty(),
+      panel: nil,
       user_rows: [],
       mode: :prompt,
       pending_bash: nil,
@@ -948,19 +1018,33 @@ defmodule EvaWebWeb.ChatLive do
     assign(socket, groups: Sessions.list_grouped(), running_ids: Sessions.running_ids())
   end
 
-  defp set_mcp_enabled(%{assigns: %{session_id: nil}} = socket, _name, _enabled?, _scope) do
-    socket
-  end
+  defp set_extension_enabled(%{assigns: %{session_id: nil}} = socket, _name, _enabled?),
+    do: socket
 
-  defp set_mcp_enabled(socket, name, enabled?, scope) do
-    case Sessions.set_mcp_enabled(socket.assigns.session_id, name, enabled?, scope) do
+  defp set_extension_enabled(socket, name, enabled?) do
+    case Sessions.set_extension_enabled(socket.assigns.session_id, name, enabled?) do
       :ok ->
         socket
 
       {:error, reason} ->
-        put_flash(socket, :error, "Could not update #{name}: #{describe(reason)}")
+        put_flash(socket, :error, "Could not update #{name}: #{describe_extension_error(reason)}")
     end
   end
+
+  # Eva's refusals are tuples meant for a caller, not sentences. The ones a user can actually cause
+  # get said plainly; anything else falls back to the generic description.
+  defp describe_extension_error(:agent_running), do: "Eva is working — let the turn finish first."
+  defp describe_extension_error(:not_found), do: "No such extension on disk."
+  defp describe_extension_error({:load_failed, reason}), do: "Failed to load: #{detail(reason)}"
+  defp describe_extension_error({:setup_failed, reason}), do: "setup/1 refused: #{detail(reason)}"
+  defp describe_extension_error(reason), do: describe(reason)
+
+  # Eva's own diagnostics are already sentences; inspecting one would only put quotes round it.
+  defp detail(reason) when is_binary(reason), do: reason
+  defp detail(reason), do: describe(reason)
+
+  defp parse_panel("extensions"), do: :extensions
+  defp parse_panel(_panel), do: nil
 
   defp load_fonts(socket, read) do
     start_async(socket, :fonts, read)

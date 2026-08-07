@@ -4,7 +4,7 @@ defmodule EvaWeb.Sessions.Ledger do
   has been forked from it.
 
   Eva hands clients a list of messages, and a message carries neither the entry it was stored as
-  nor an honest timestamp — `Eva.Agent.Messages` structs default theirs at compile time, so every
+  nor an honest timestamp — `Eva.Core.Agent.Messages` structs default theirs at compile time, so every
   message in a session claims the moment Eva was built. The append-only log has both, so this reads
   it back and lines it up with the messages, row for row.
 
@@ -18,7 +18,7 @@ defmodule EvaWeb.Sessions.Ledger do
 
   require Logger
 
-  alias Eva.Agent.Messages
+  alias Eva.Core.Agent.Messages
   alias Eva.Agent.Session.Entries
   alias Eva.Agent.Session.State, as: SessionState
   alias Eva.Agent.Session.Storage

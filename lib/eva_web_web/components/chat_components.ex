@@ -4,7 +4,7 @@ defmodule EvaWebWeb.ChatComponents do
   """
   use EvaWebWeb, :html
 
-  alias EvaWeb.Sessions.MCP
+  alias EvaWeb.Sessions.Extensions
   alias EvaWeb.Sessions.Transcript
 
   # Syntect ships its own themes (from the Rust two-face crate) and emits inline styles, so the
@@ -552,29 +552,31 @@ defmodule EvaWebWeb.ChatComponents do
   defp ngettext_family(_count), do: "families"
 
   @doc """
-  Header control showing how many MCP servers are connected, and opening the panel.
+  Header control showing how many extensions loaded, and opening the panel.
 
-  Hidden entirely when the project configures no servers — an "MCP 0/0" chip is noise for the
-  sessions that never touch MCP at all.
+  Hidden for a session with none — an "EXT 0/0" chip is noise. A load failure is shown even then,
+  and so is a directory waiting to be approved, because those are exactly the cases where nothing
+  else on screen says anything at all.
   """
-  attr :mcp, :map, required: true
+  attr :extensions, :map, required: true
   attr :open, :boolean, default: false
 
-  def mcp_indicator(assigns) do
-    {connected, total} = MCP.connected(assigns.mcp)
+  def extensions_indicator(assigns) do
+    {loaded, total} = Extensions.loaded(assigns.extensions)
 
-    assigns =
-      assigns
-      |> assign(connected: connected, total: total)
-      |> assign(:unhealthy, MCP.unhealthy(assigns.mcp))
+    assigns = assign(assigns, loaded: loaded, total: total)
 
     ~H"""
     <button
-      :if={MCP.any?(@mcp) or @mcp.diagnostics != []}
-      id="mcp-toggle"
+      :if={
+        Extensions.any?(@extensions) or @extensions.diagnostics != [] or
+          Extensions.pending?(@extensions)
+      }
+      id="extensions-toggle"
       type="button"
-      phx-click="toggle_mcp"
-      title="MCP servers"
+      phx-click="toggle_panel"
+      phx-value-panel="extensions"
+      title="Extensions"
       aria-expanded={to_string(@open)}
       class={[
         "flex shrink-0 items-center gap-1.5 border px-2 py-0.5 text-3xs transition-colors",
@@ -584,226 +586,304 @@ defmodule EvaWebWeb.ChatComponents do
         )
       ]}
     >
+      <%!-- Waiting on approval is amber before it is red: nothing is broken, someone just has to
+            decide. A diagnostic that isn't that is a genuine failure to load. --%>
       <span class={[
         "size-1.5 shrink-0 rounded-full",
         cond do
-          @unhealthy != [] -> "bg-red-500"
+          Extensions.pending?(@extensions) -> "bg-amber-500"
+          @extensions.diagnostics != [] -> "bg-red-500"
           @total == 0 -> "bg-zinc-600"
-          @connected == @total -> "bg-emerald-500"
-          true -> "animate-pulse bg-amber-500"
+          @loaded == @total -> "bg-emerald-500"
+          true -> "bg-zinc-600"
         end
       ]} />
-      <span class="font-medium tracking-wide">MCP</span>
-      <span class="tabular-nums">{@connected}/{@total}</span>
+      <span class="font-medium tracking-wide">EXT</span>
+      <span class="tabular-nums">{@loaded}/{@total}</span>
     </button>
     """
   end
 
   @doc """
-  Slide-over listing every configured MCP server and what it is currently offering.
+  Slide-over listing every extension the session knows about and what it contributes.
 
-  Rendered as a sibling of the transcript rather than a modal: the user opens it to read a failure
-  while the agent keeps working, so the conversation stays visible next to it. Below `xl` there
-  isn't room for both once the session sidebar has taken its share, so it overlays instead of
-  squeezing the transcript into a column too narrow to read.
+  Rows are every `.exs` Eva would discover, not only the ones that loaded: a switched-off
+  extension has no spec to describe it, and dropping its row would leave nothing to switch back
+  on. What it *was* offering is gone from the row meanwhile, which is the honest thing to show —
+  a disabled extension contributes nothing.
+
+  Extensions running on their own node are here too, and read the same way. They have no file and
+  no toggle to compile: they are up because someone started them, and the row says which node
+  rather than which path.
   """
-  attr :mcp, :map, required: true
+  attr :extensions, :map, required: true
   attr :open, :boolean, default: false
+  attr :running, :boolean, default: false
 
-  def mcp_panel(assigns) do
+  def extensions_panel(assigns) do
     ~H"""
     <div
       :if={@open}
-      id="mcp-panel"
+      id="extensions-panel"
       class="absolute inset-y-0 right-0 z-40 flex w-96 max-w-full shrink-0 flex-col border-l border-zinc-800 bg-[#0a0a0a] shadow-2xl xl:static xl:z-auto xl:shadow-none"
-      phx-window-keydown="close_mcp"
+      phx-window-keydown="close_panel"
       phx-key="escape"
     >
       <div class="flex h-12 shrink-0 items-center justify-between border-b border-zinc-800 px-4">
         <span class="text-xs font-semibold uppercase tracking-wider text-zinc-400">
-          MCP servers
+          Extensions
         </span>
-        <button
-          type="button"
-          phx-click="close_mcp"
-          title="Close"
-          aria-label="Close MCP panel"
-          class="flex size-6 items-center justify-center text-zinc-600 transition-colors hover:text-zinc-200"
-        >
-          <.icon name="hero-x-mark-mini" class="size-4" />
-        </button>
+        <div class="flex items-center gap-1.5">
+          <%!-- The compiled module is cached for the life of the VM, so an edited file is invisible
+                until this is pressed. Eva refuses mid-turn, and so does the button. --%>
+          <button
+            id="extensions-reload"
+            type="button"
+            phx-click="reload_extensions"
+            disabled={@running}
+            title={
+              if @running,
+                do: "Eva is working — reload when the turn ends",
+                else: "Recompile every extension from disk"
+            }
+            class="border border-zinc-700 px-2 py-0.5 text-3xs text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-200 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:text-zinc-700"
+          >
+            Reload
+          </button>
+          <button
+            type="button"
+            phx-click="close_panel"
+            title="Close"
+            aria-label="Close extensions panel"
+            class="flex size-6 items-center justify-center text-zinc-600 transition-colors hover:text-zinc-200"
+          >
+            <.icon name="hero-x-mark-mini" class="size-4" />
+          </button>
+        </div>
       </div>
 
       <div class="flex-1 overflow-y-auto">
+        <.extension_trust pending={@extensions.pending} running={@running} />
+
         <p
-          :for={diagnostic <- @mcp.diagnostics}
-          class="border-b border-zinc-800 bg-amber-950/20 px-4 py-2 text-2xs text-amber-500/90"
+          :for={diagnostic <- @extensions.diagnostics}
+          class="border-b border-zinc-800 bg-amber-950/20 px-4 py-2 text-2xs leading-relaxed text-amber-500/90"
         >
           {diagnostic}
         </p>
 
-        <p :if={@mcp.servers == []} class="px-4 py-6 text-xs leading-relaxed text-zinc-600">
-          No MCP servers configured. Add them to <code class="text-zinc-500">~/.eva/mcp.json</code>
-          or <code class="text-zinc-500">.eva/mcp.json</code>
+        <%!-- Not shown while a directory is waiting: there *are* extensions here, and telling
+              someone where to put one when the answer is to approve the ones they have is wrong. --%>
+        <p
+          :if={@extensions.extensions == [] and not Extensions.pending?(@extensions)}
+          class="px-4 py-6 text-xs leading-relaxed text-zinc-600"
+        >
+          No extensions. Drop an <code class="text-zinc-500">.exs</code>
+          into <code class="text-zinc-500">~/.eva/extensions/</code>
+          or <code class="text-zinc-500">.eva/extensions/</code>
           in the project.
         </p>
 
-        <.mcp_server :for={server <- @mcp.servers} server={server} />
+        <.extension
+          :for={extension <- @extensions.extensions}
+          extension={extension}
+          running={@running}
+        />
       </div>
     </div>
     """
   end
 
-  attr :server, :map, required: true
+  @doc """
+  The consent prompt for a project's own extension directory.
 
-  defp mcp_server(assigns) do
+  Project extensions are code from whoever wrote the repository and they run before the first
+  prompt, so Eva loads none of them until this is answered. The directory is named in full and the
+  button is not the default action: approving is a decision, and one that covers every `.exs` in
+  there as it stands right now. Editing one asks again.
+  """
+  attr :pending, :list, required: true
+  attr :running, :boolean, default: false
+
+  def extension_trust(assigns) do
     ~H"""
     <section
-      id={"mcp-server-#{MCP.scope_label(@server.scope)}-#{@server.name}"}
-      class="border-b border-zinc-800 px-4 py-3"
+      :if={@pending != []}
+      id="extensions-trust"
+      class="border-b border-zinc-800 bg-amber-950/20 px-4 py-3"
     >
-      <div class="flex items-center gap-2">
-        <.mcp_switch server={@server} />
-        <span class={[
-          "min-w-0 flex-1 truncate text-sm",
-          if(@server.enabled?, do: "text-zinc-200", else: "text-zinc-500")
-        ]}>
-          {@server.name}
-        </span>
-        <span class="shrink-0 border border-zinc-800 px-1.5 py-0.5 text-4xs uppercase tracking-wider text-zinc-600">
-          {@server.transport}
-        </span>
-        <span class="shrink-0 border border-zinc-800 px-1.5 py-0.5 text-4xs uppercase tracking-wider text-zinc-600">
-          {MCP.scope_label(@server.scope)}
-        </span>
-      </div>
-
-      <p class="mt-1 truncate text-2xs text-zinc-600" title={@server.target}>{@server.target}</p>
-
-      <div class="mt-1 flex items-center gap-2 text-3xs text-zinc-600">
-        <span class={mcp_status_text_class(@server.status)}>{mcp_status_label(@server.status)}</span>
-        <span :if={@server.server_version}>v{@server.server_version}</span>
-        <span :if={@server.protocol_version}>spec {@server.protocol_version}</span>
-      </div>
-
-      <%!-- A session toggle lives in this session's transcript, so the same server can be on for
-            one conversation and off for the next. Saying so — and offering the one action that
-            makes it stick — is what keeps that from being a surprise. --%>
-      <div
-        :if={@server.overridden?}
-        class="mt-2 flex items-center justify-between gap-2 border border-zinc-800 bg-zinc-900/40 px-2 py-1"
-      >
-        <span class="min-w-0 text-3xs text-zinc-500">
-          This session only — {if @server.config_enabled,
-            do: "config says on",
-            else: "config says off"}
-        </span>
-        <button
-          type="button"
-          id={"mcp-persist-#{@server.name}"}
-          phx-click="mcp_persist"
-          phx-value-name={@server.name}
-          phx-value-enabled={to_string(@server.enabled?)}
-          title="Write this to mcp.json"
-          class="shrink-0 border border-zinc-700 px-1.5 py-0.5 text-3xs text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-200"
-        >
-          Save to config
-        </button>
-      </div>
-
-      <p
-        :if={@server.error}
-        class="mt-2 break-words border border-red-900/60 bg-red-950/30 px-2 py-1 text-2xs text-red-300"
-      >
-        {@server.error}
+      <p class="text-2xs font-semibold uppercase tracking-wider text-amber-500">
+        Waiting for approval
       </p>
-
-      <p
-        :if={@server.login_command}
-        class="mt-2 break-all border border-amber-900/60 bg-amber-950/20 px-2 py-1 text-2xs text-amber-300"
-      >
-        Run <code>{@server.login_command}</code>
+      <p class="mt-1 text-2xs leading-relaxed text-amber-500/80">
+        This project ships extensions of its own. They run before your first prompt and can read
+        and rewrite what the model sees, so nothing here is loaded until you say so.
       </p>
-
-      <details :if={@server.tools != []} class="mt-2 group">
-        <summary class="cursor-pointer text-2xs text-zinc-500 hover:text-zinc-300">
-          {length(@server.tools)} {ngettext_tool(length(@server.tools))}
-        </summary>
-        <ul class="mt-1 space-y-1 border-l border-zinc-800 pl-2">
-          <li :for={tool <- @server.tools}>
-            <p class="truncate font-mono text-2xs text-zinc-400">{tool.name}</p>
-            <p :if={tool[:description]} class="line-clamp-2 text-3xs leading-relaxed text-zinc-600">
-              {tool.description}
-            </p>
-          </li>
-        </ul>
-      </details>
-
-      <p
-        :if={@server.tools == [] and @server.status == :connected}
-        class="mt-2 text-2xs text-zinc-600"
-      >
-        No tools exposed.
+      <p :for={dir <- @pending} class="mt-1.5 break-all font-mono text-3xs text-amber-500/70">
+        {dir}
       </p>
+      <button
+        id="extensions-trust-approve"
+        type="button"
+        phx-click="trust_extensions"
+        disabled={@running}
+        title={
+          if @running,
+            do: "Eva is working — approving reloads the set, so it waits for the turn to end",
+            else: "Approve these directories as they are now and load them"
+        }
+        class="mt-2 border border-amber-700 px-2 py-0.5 text-3xs text-amber-400 transition-colors hover:border-amber-500 hover:text-amber-200 disabled:cursor-not-allowed disabled:border-zinc-800 disabled:text-zinc-700"
+      >
+        Approve and load
+      </button>
     </section>
     """
   end
 
-  # On/off for one server, scoped to this session. The status dot doubles as the switch rather than
-  # sitting next to one: it already said whether the server was running, and two controls for one
-  # fact is how they end up disagreeing.
-  attr :server, :map, required: true
+  attr :extension, :map, required: true
+  attr :running, :boolean, default: false
 
-  defp mcp_switch(assigns) do
+  defp extension(assigns) do
+    ~H"""
+    <section id={"extension-#{@extension.name}"} class="border-b border-zinc-800 px-4 py-3">
+      <div class="flex items-center gap-2">
+        <.extension_switch extension={@extension} running={@running} />
+        <span class={[
+          "min-w-0 flex-1 truncate text-sm",
+          if(@extension.loaded?, do: "text-zinc-200", else: "text-zinc-500")
+        ]}>
+          {@extension.name}
+        </span>
+        <span class="shrink-0 border border-zinc-800 px-1.5 py-0.5 text-4xs uppercase tracking-wider text-zinc-600">
+          {Extensions.scope_label(@extension.scope)}
+        </span>
+      </div>
+
+      <%!-- A node extension has no file to name. Where it is running is the equivalent fact, and
+            the only one that tells two of them apart. --%>
+      <p :if={@extension.path} class="mt-1 truncate text-2xs text-zinc-600" title={@extension.path}>
+        {@extension.path}
+      </p>
+      <p :if={is_nil(@extension.path)} class="mt-1 truncate font-mono text-2xs text-zinc-600">
+        {@extension.node}
+      </p>
+
+      <div class="mt-1 flex flex-wrap items-center gap-2 text-3xs text-zinc-600">
+        <span class={extension_status_text_class(@extension.status)}>
+          {extension_status_label(@extension.status)}
+        </span>
+        <span :if={@extension.tool_count > 0}>
+          {@extension.tool_count} {ngettext_tool(@extension.tool_count)}
+        </span>
+        <span :for={hook <- @extension.hooks} class="border border-zinc-800 px-1 py-px">
+          {hook}
+        </span>
+        <span :for={class <- @extension.event_classes} class="text-zinc-700">
+          {class} events
+        </span>
+      </div>
+
+      <%!-- Clicking fills the composer rather than running it: a command may take arguments, and
+            one that doesn't is still the user's to send. --%>
+      <ul :if={@extension.commands != []} class="mt-2 space-y-1">
+        <li :for={command <- @extension.commands}>
+          <button
+            type="button"
+            phx-click="use_command"
+            phx-value-text={Extensions.command_text(command)}
+            disabled={not command.active?}
+            title={
+              if command.active?,
+                do: "Put /#{command.name} in the composer",
+                else: "Another extension already claimed /#{command.name}"
+            }
+            class="flex w-full items-baseline gap-1.5 border border-zinc-800 px-2 py-1 text-left transition-colors hover:border-zinc-600 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-zinc-800"
+          >
+            <span class="shrink-0 font-mono text-2xs text-zinc-300">/{command.name}</span>
+            <span :if={command.arg_hint} class="shrink-0 font-mono text-3xs text-zinc-600">
+              {command.arg_hint}
+            </span>
+            <span :if={command.description} class="min-w-0 truncate text-3xs text-zinc-500">
+              {command.description}
+            </span>
+          </button>
+        </li>
+      </ul>
+    </section>
+    """
+  end
+
+  # On/off for one extension, scoped to this session and recorded in its transcript. Disabled while
+  # Eva works, for the same reason Eva refuses then: the running loop is holding the hook functions
+  # this would pull out from under it.
+  #
+  # A node extension has no switch at all. Eva would take it out of the session readily enough, but
+  # putting it back means finding it on disk, and there is nothing on disk to find — the row would
+  # vanish with no way to bring it back short of a reload. Its node is what owns its lifetime, and
+  # `mix eva.ext.stop <name>` is where that decision belongs.
+  attr :extension, :map, required: true
+  attr :running, :boolean, default: false
+
+  defp extension_switch(assigns) do
     ~H"""
     <button
       type="button"
       role="switch"
-      id={"mcp-switch-#{@server.name}"}
-      aria-checked={to_string(@server.enabled?)}
-      aria-label={"#{if @server.enabled?, do: "Disable", else: "Enable"} #{@server.name}"}
-      phx-click="mcp_set_enabled"
-      phx-value-name={@server.name}
-      phx-value-enabled={to_string(not @server.enabled?)}
-      title={if @server.enabled?, do: "Switch off for this session", else: "Switch on"}
+      id={"extension-switch-#{@extension.name}"}
+      aria-checked={to_string(@extension.loaded?)}
+      aria-label={"#{if @extension.loaded?, do: "Disable", else: "Enable"} #{@extension.name}"}
+      phx-click="extension_set_enabled"
+      phx-value-name={@extension.name}
+      phx-value-enabled={to_string(not @extension.loaded?)}
+      disabled={@running or @extension.scope == :node}
+      title={
+        cond do
+          @extension.scope == :node ->
+            "Running on #{@extension.node} — stop it with mix eva.ext.stop #{@extension.name}"
+
+          @running ->
+            "Eva is working — toggle when the turn ends"
+
+          @extension.loaded? ->
+            "Switch off for this session"
+
+          true ->
+            "Switch on"
+        end
+      }
       class={[
-        "flex h-4 w-8 shrink-0 items-center gap-px border p-px transition-colors",
-        if(@server.enabled?,
+        "flex h-4 w-8 shrink-0 items-center gap-px border p-px transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+        if(@extension.loaded?,
           do: "border-zinc-600 bg-zinc-800/80",
           else: "border-zinc-800 bg-transparent hover:border-zinc-600"
         )
       ]}
     >
-      <%!-- Two cells rather than a sliding knob: the filled one is the side the switch is on, which
-            reads at this size where a 2px travel distance does not. --%>
       <span class={[
         "h-full flex-1 transition-colors",
-        if(@server.enabled?, do: "bg-transparent", else: "bg-zinc-800")
+        if(@extension.loaded?, do: "bg-transparent", else: "bg-zinc-800")
       ]} />
       <span class={[
         "h-full flex-1 transition-colors",
-        if(@server.enabled?, do: mcp_status_class(@server.status), else: "bg-transparent")
+        if(@extension.loaded?, do: extension_status_class(@extension.status), else: "bg-transparent")
       ]} />
     </button>
     """
   end
 
-  defp mcp_status_label(:connected), do: "connected"
-  defp mcp_status_label(:connecting), do: "connecting…"
-  defp mcp_status_label(:needs_auth), do: "needs login"
-  defp mcp_status_label(:disabled), do: "off"
-  defp mcp_status_label(:failed), do: "failed"
+  # An extension with only tools or guidelines is merged into the session as data and never gets a
+  # process — "loaded" rather than "running", so a missing process doesn't read as a fault.
+  defp extension_status_label(:running), do: "running"
+  defp extension_status_label(:loaded), do: "loaded"
+  defp extension_status_label(:off), do: "off"
 
-  defp mcp_status_class(:connected), do: "bg-emerald-500"
-  defp mcp_status_class(:connecting), do: "animate-pulse bg-amber-500"
-  defp mcp_status_class(:needs_auth), do: "bg-amber-500"
-  defp mcp_status_class(:disabled), do: "bg-zinc-700"
-  defp mcp_status_class(:failed), do: "bg-red-500"
+  defp extension_status_class(:running), do: "bg-emerald-500"
+  defp extension_status_class(:loaded), do: "bg-sky-500"
+  defp extension_status_class(:off), do: "bg-zinc-700"
 
-  defp mcp_status_text_class(:failed), do: "text-red-400"
-  defp mcp_status_text_class(:needs_auth), do: "text-amber-400"
-  defp mcp_status_text_class(:connected), do: "text-emerald-500"
-  defp mcp_status_text_class(_status), do: "text-zinc-500"
+  defp extension_status_text_class(:running), do: "text-emerald-500"
+  defp extension_status_text_class(:loaded), do: "text-sky-500"
+  defp extension_status_text_class(:off), do: "text-zinc-600"
 
   defp ngettext_tool(1), do: "tool"
   defp ngettext_tool(_count), do: "tools"
@@ -991,11 +1071,48 @@ defmodule EvaWebWeb.ChatComponents do
     """
   end
 
-  def message(%{item: %{kind: :note}} = assigns) do
+  # Eva's own notes — a compaction, a branch summary — are asides between turns, so they read as
+  # centred marginalia. They are the notes with nothing in `name`: only a custom message carries a
+  # type, and only an extension sends one.
+  def message(%{item: %{kind: :note, name: nil}} = assigns) do
     ~H"""
     <div class="px-4 py-2 text-center text-xs italic text-zinc-600">{@item.text}</div>
     """
   end
+
+  # An extension answering the user is not an aside: it's a reply to something they typed, or a
+  # warning they need to act on. It gets a left-aligned block, attributed, and coloured by level.
+  # Only `API.notify/3` names the extension it came from, so the type stands in when it doesn't.
+  def message(%{item: %{kind: :note}} = assigns) do
+    ~H"""
+    <div class="px-4 py-2">
+      <div class={[
+        "max-w-[85%] border-l-2 py-1.5 pl-3 pr-3 text-sm",
+        note_level_class(@item.level)
+      ]}>
+        <div class="flex items-center gap-1.5">
+          <span class="text-3xs uppercase tracking-wider text-zinc-500">
+            {@item.source || note_label(@item.name)}
+          </span>
+          <span :if={@item.source} class="text-3xs text-zinc-700">{note_label(@item.name)}</span>
+          <.message_time at={@item.at} />
+        </div>
+        <div phx-no-format class="mt-0.5 whitespace-pre-wrap break-words">{@item.text}</div>
+      </div>
+    </div>
+    """
+  end
+
+  defp note_level_class(:error), do: "border-red-800 bg-red-950/25 text-red-300"
+  defp note_level_class(:warning), do: "border-amber-800/70 bg-amber-950/20 text-amber-300/90"
+  defp note_level_class(_level), do: "border-zinc-700 bg-[#111] text-zinc-300"
+
+  # Eva's own three types, said the way a reader would say them. Anything else is a type an
+  # extension chose itself, and it is not this module's place to rewrite it.
+  defp note_label("extension_command"), do: "command"
+  defp note_label("extension_input"), do: "input"
+  defp note_label("extension_notice"), do: "notice"
+  defp note_label(custom_type), do: custom_type
 
   @doc """
   When a row was written, in the clock of whoever is reading it.
