@@ -3,6 +3,10 @@
 
 @import "tailwindcss" source(none);
 @import "phoenix-colocated/eva_web/colocated.css";
+/* The mermaid diagram container: sizing, the grab cursor, and the toolbar that fades in on hover.
+   Taken from the package so it stays in step with the markup MDExMermex generates; its light-theme
+   colours are overridden at the bottom of this file. */
+@import "../../deps/mdex_mermex/assets/mdex_mermex.css";
 @source "../css";
 @source "../js";
 @source "../../lib/eva_web_web";
@@ -217,5 +221,57 @@
 .md table { margin: 0.5rem 0; display: block; overflow-x: auto; border-collapse: collapse }
 .md th, .md td { padding: 0.25rem 0.5rem; border: 1px solid var(--color-zinc-800); text-align: left }
 .md th { color: var(--color-zinc-200); font-weight: 600 }
+
+/* Mermaid diagrams, over the package's own light-theme defaults. The diagram itself is recoloured
+   where it is drawn — see `@palette` in `EvaWebWeb.Mermaid` — and this background must stay that
+   table's canvas colour, since it is the padding around the same picture.
+
+   `fit-content` is what makes it a figure rather than a band: the container is a plain block, and
+   a two-node flowchart is a few hundred pixels of drawing that would otherwise sit marooned in a
+   message-wide slab. Hugging the diagram also puts the toolbar, which is positioned against this
+   box, over the picture it drives instead of far off to the right of it. */
+.md .mdex-mermex {
+  width: fit-content;
+  max-width: 100%;
+  margin: 0.625rem auto;
+  padding: 0.625rem;
+  background: #1c1c1c;
+  border: 1px solid var(--color-zinc-800);
+  border-radius: 0;
+}
+.md .mdex-mermex:hover { border-color: var(--color-zinc-700) }
+
+/* An <img> is draggable by default, so a press-and-move on the diagram started a native
+   drag-and-drop — its own cursor, overriding the `grabbing` one, and panning only beginning once
+   that was let go of. The pan handlers are all on the container, and the toolbar buttons are the
+   image's siblings, so nothing here needs the image to take a pointer at all. */
+.md .mdex-mermex img {
+  pointer-events: none;
+  user-select: none;
+}
+
+/* A diagram that would not parse: the parser's complaint, then the source as an ordinary code
+   block. Amber rather than red — the fence is still readable and the message around it is intact,
+   so this is a thing that didn't draw, not a thing that broke. */
+.md .md-diagram-error { margin: 0.625rem 0 }
+.md .md-diagram-error-note {
+  padding: 0.375rem 0.75rem;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--color-amber-400);
+  background: color-mix(in oklab, var(--color-amber-500) 10%, transparent);
+  border: 1px solid var(--color-amber-500);
+  border-bottom: 0;
+}
+.md .md-diagram-error > pre { margin: 0 }
+
+/* The toolbar sits over the diagram, which is now as dark as the page around it. */
+.md .mdex-mermex-btn {
+  background: var(--color-zinc-800);
+  border-color: var(--color-zinc-700);
+  border-radius: 0;
+  color: var(--color-zinc-300);
+}
+.md .mdex-mermex-btn:hover { background: var(--color-zinc-700); color: var(--color-zinc-100) }
 
 /* This file is for your main application CSS */

@@ -23,6 +23,11 @@ import {Socket} from "phoenix"
 import {LiveSocket} from "phoenix_live_view"
 import {hooks as colocatedHooks} from "phoenix-colocated/eva_web"
 import topbar from "../vendor/topbar"
+// Zoom, pan and fullscreen for the mermaid diagrams `EvaWebWeb.ChatComponents.markdown/1` renders.
+// Taken from the package rather than injected into every message, and self-installing: it watches
+// the document for `.mdex-mermex` containers, which is how a diagram arriving in a LiveView patch
+// gets wired up.
+import "../../deps/mdex_mermex/assets/mdex_mermex.js"
 
 const Hooks = {
   ...colocatedHooks,

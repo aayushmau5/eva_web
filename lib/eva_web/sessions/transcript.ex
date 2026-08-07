@@ -30,6 +30,7 @@ defmodule EvaWeb.Sessions.Transcript do
           at: float() | nil,
           entry_id: String.t() | nil,
           forks: [Ledger.fork()],
+          streaming?: boolean(),
           origin: :agent | :user,
           private?: boolean(),
           level: :info | :warning | :error | nil,
@@ -54,6 +55,9 @@ defmodule EvaWeb.Sessions.Transcript do
     at: nil,
     entry_id: nil,
     forks: [],
+    # Still arriving. Only ever true for the assistant row currently being written, and only from a
+    # live event — everything read back from storage has finished.
+    streaming?: false,
     # Who ran it. A bash row the user typed themselves and one the model called look the same
     # otherwise, and which of the two it was is most of what the row means.
     origin: :agent,
@@ -103,9 +107,13 @@ defmodule EvaWeb.Sessions.Transcript do
 
   `at` is carried by the caller across a message's updates: a row is stamped when it starts, and
   every delta after that rebuilds it whole.
+
+  `streaming?` marks the row as still being written, which is a live event's to say — a message
+  read back from storage has finished by definition.
   """
-  @spec assistant_item(String.t(), Messages.AssistantMessage.t(), float() | nil) :: item()
-  def assistant_item(id, %Messages.AssistantMessage{} = message, at \\ nil) do
+  @spec assistant_item(String.t(), Messages.AssistantMessage.t(), float() | nil, boolean()) ::
+          item()
+  def assistant_item(id, %Messages.AssistantMessage{} = message, at \\ nil, streaming? \\ false) do
     %{
       @base
       | id: id,
@@ -113,7 +121,8 @@ defmodule EvaWeb.Sessions.Transcript do
         blocks: blocks(message.content),
         text: Messages.AssistantMessage.text(message),
         error: error_message(message),
-        at: at
+        at: at,
+        streaming?: streaming?
     }
   end
 

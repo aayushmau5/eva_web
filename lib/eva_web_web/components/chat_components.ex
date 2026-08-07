@@ -993,7 +993,9 @@ defmodule EvaWebWeb.ChatComponents do
             <% {:text, text} -> %>
               <%!-- data-copy-part is what the copy button collects: the prose, without the
                     thinking blocks wrapped around it. --%>
-              <div data-copy-part class="md break-words text-sm text-zinc-200">{markdown(text)}</div>
+              <div data-copy-part class="md break-words text-sm text-zinc-200">
+                {markdown(text, @item.streaming?)}
+              </div>
           <% end %>
         <% end %>
 
@@ -1330,6 +1332,34 @@ defmodule EvaWebWeb.ChatComponents do
     """
   end
 
+  # A ```mermaid fence becomes an SVG, rendered here rather than in the browser: MDExMermex calls
+  # a Rust NIF and hands back an <img> whose src is the diagram as a base64 data URI. Its own
+  # <style> and <script> are declined — the sanitizer strips both anyway, and injecting them once
+  # per message would repeat them down the whole transcript. `assets/js/app.js` and
+  # `assets/css/app.css` import the package's copies instead, once.
+  @mermaid {MDExMermex, inject_css: false, inject_js: false}
+
+  # What the mermaid wrapper needs on top of MDEx's defaults, and nothing else:
+  #
+  #   * `data` as a URL scheme, for the <img> the diagram arrives in. An SVG inside <img> is
+  #     rendered with scripting off and no network access, so this is the safe half of the two
+  #     shapes MDExMermex can emit — inline <svg>, the other one, would need the sanitizer opened
+  #     up to a tag that can carry <script> and event handlers.
+  #   * `button`, with the class and title the zoom/pan/fullscreen toolbar is styled and labelled
+  #     by. A <button> the model wrote itself is inert: no form to submit, and `onclick` is not on
+  #     any allowlist here.
+  #   * `tabindex` on `div`, which is what lets the container take focus for fullscreen.
+  #
+  # The cost is that `url_schemes` is global to href and src alike, so this also lets a
+  # `<a href="data:text/html,...">` the model wrote survive. Every current browser refuses to
+  # navigate to a data: URL from a link, so it is a dead link rather than a way in — but it is a
+  # real widening, and the alternative is rendering diagrams through an endpoint of our own.
+  @mermaid_sanitize [
+    add_url_schemes: ["data"],
+    add_tags: ["button"],
+    add_tag_attributes: %{"button" => ["class", "title"], "div" => ["tabindex"]}
+  ]
+
   @doc """
   Renders assistant markdown as sanitized HTML.
 
@@ -1337,16 +1367,23 @@ defmodule EvaWebWeb.ChatComponents do
   can drop arbitrary repo file contents into a message, so a file containing `<img onerror=...>`
   would otherwise become live markup. `hardbreaks` keeps single newlines visible, which is what
   chat readers expect and plain CommonMark would swallow.
+
+  `streaming?` says the message is still arriving, which is the one state where a diagram that
+  won't parse means nothing — see `EvaWebWeb.Mermaid`.
   """
-  @spec markdown(String.t()) :: Phoenix.HTML.safe() | String.t()
-  def markdown(text) do
+  @spec markdown(String.t(), boolean()) :: Phoenix.HTML.safe() | String.t()
+  def markdown(text, streaming? \\ false) do
+    sanitize =
+      MDEx.Document.default_sanitize_options()
+      |> Keyword.put(:set_tag_attribute_values, %{"a" => %{"target" => "_blank"}})
+      |> Keyword.merge(@mermaid_sanitize)
+
     case MDEx.to_html(text,
            extension: [table: true, strikethrough: true, tasklist: true, autolink: true],
            render: [hardbreaks: true],
            syntax_highlight: [engine: :syntect, opts: [theme: @code_theme]],
-           sanitize:
-             MDEx.Document.default_sanitize_options()
-             |> Keyword.put(:set_tag_attribute_values, %{"a" => %{"target" => "_blank"}})
+           plugins: [@mermaid, {EvaWebWeb.Mermaid, show_errors: not streaming?}],
+           sanitize: sanitize
          ) do
       {:ok, html} -> Phoenix.HTML.raw(html)
       # Show the raw text rather than losing the message; HEEx escapes it.

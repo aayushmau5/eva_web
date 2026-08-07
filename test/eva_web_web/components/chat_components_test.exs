@@ -90,6 +90,95 @@ defmodule EvaWebWeb.ChatComponentsTest do
     end
   end
 
+  describe "markdown/1 mermaid diagrams" do
+    test "renders a mermaid fence as an embedded svg" do
+      html = render("```mermaid\nflowchart LR\n  A-->B\n```")
+
+      assert html =~ ~s|<div class="mdex-mermex"|
+      assert html =~ ~s|<img src="data:image/svg+xml;base64,|
+      # The fence's source is gone: what is left is the picture it drew.
+      refute html =~ "flowchart LR"
+    end
+
+    # Mermex has no theme option, so the diagram arrives drawn on white in slate and is recoloured
+    # on the way out. If it ever gains one, or changes its palette, this is what notices.
+    test "recolours the diagram for a dark page" do
+      svg =
+        "```mermaid\nflowchart LR\n  A-->B\n```"
+        |> render()
+        |> then(&Regex.run(~r|base64,([A-Za-z0-9+/=]+)"|, &1, capture: :all_but_first))
+        |> hd()
+        |> Base.decode64!()
+
+      # The canvas, which `.md .mdex-mermex` pads the diagram out with, and the text colour.
+      assert svg =~ "#1c1c1c"
+      assert svg =~ "#e4e4e7"
+      refute svg =~ "#FFFFFF"
+      refute svg =~ "#0F172A"
+    end
+
+    test "keeps the toolbar the diagram is driven by" do
+      html = render("```mermaid\nflowchart LR\n  A-->B\n```")
+
+      assert html =~ ~s|class="mdex-mermex-btn mdex-mermex-zoom-in"|
+      assert html =~ ~s|class="mdex-mermex-btn mdex-mermex-fullscreen"|
+      assert html =~ ~s|tabindex="0"|
+    end
+
+    test "shows a fence that will not parse as code, with the parser's complaint" do
+      html = render("```mermaid\nnot a diagram\n```")
+
+      assert html =~ ~s|<div class="md-diagram-error">|
+      assert html =~ "missing Mermaid diagram header"
+      # The source stays readable rather than being swapped for the error.
+      assert html =~ "not a diagram"
+      refute html =~ "mdex-mermex"
+    end
+
+    # Mermex is a reimplementation, not mermaid.js, and does not do the block constructs. Valid
+    # mermaid that it turns down is exactly the case the message is there for.
+    test "reports a sequenceDiagram block construct it cannot render" do
+      html =
+        render("```mermaid\nsequenceDiagram\n  A->>B: hi\n  alt yes\n    B-->>A: ok\n  end\n```")
+
+      assert html =~ ~s|<div class="md-diagram-error">|
+      assert html =~ "expected matching subgraph"
+    end
+
+    # A message arrives a token at a time, and for most of a diagram's arrival the fence cannot
+    # parse. That is not a failure worth reporting, so it goes quiet until the message lands.
+    test "says nothing about a half-written fence while the message streams" do
+      html =
+        "```mermaid\nflowchart LR\n  A--"
+        |> ChatComponents.markdown(true)
+        |> Phoenix.HTML.safe_to_string()
+
+      assert html =~ "flowchart LR"
+      refute html =~ "md-diagram-error"
+      refute html =~ "mdex-mermex"
+    end
+
+    # A failure is the fence's, not the message's.
+    test "keeps the surrounding message, and other diagrams, when one fails" do
+      html = render("Before\n\n```mermaid\nnope\n```\n\n```mermaid\nflowchart LR\n  A-->B\n```")
+
+      assert html =~ "Before"
+      assert html =~ "md-diagram-error"
+      assert html =~ ~s|<img src="data:image/svg+xml;base64,|
+    end
+
+    # Rendering diagrams means allowing data: URLs, which is only safe because the SVG arrives as
+    # an <img> — scripting off, no network — rather than as inline markup.
+    test "still drops scripts and handlers with diagrams enabled" do
+      html = render(~s|<svg><script>alert(1)</script></svg>|)
+      refute html =~ "<svg"
+      refute html =~ "alert("
+
+      refute render(~s|<img src="data:image/svg+xml;base64,AAAA" onerror="alert(1)">|) =~
+               "onerror"
+    end
+  end
+
   # The model's output is untrusted — the read tool alone can put arbitrary repo file contents into
   # a message — and it goes through raw/1, so sanitizing is the only thing standing between a file
   # on disk and live markup.

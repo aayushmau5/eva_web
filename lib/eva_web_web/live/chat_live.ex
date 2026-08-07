@@ -496,7 +496,7 @@ defmodule EvaWebWeb.ChatLive do
     {:noreply,
      socket
      |> assign(current_id: id, current_at: at)
-     |> stream_insert(:messages, Transcript.assistant_item(id, message, at))}
+     |> stream_insert(:messages, Transcript.assistant_item(id, message, at, true))}
   end
 
   def handle_info({:eva, %Events.MessageUpdate{assistant_message_event: event}}, socket) do
@@ -504,7 +504,7 @@ defmodule EvaWebWeb.ChatLive do
     # re-rendered from `partial` rather than by accumulating deltas here.
     case {socket.assigns.current_id, Map.get(event, :partial)} do
       {id, %Messages.AssistantMessage{} = partial} when is_binary(id) ->
-        item = Transcript.assistant_item(id, partial, socket.assigns.current_at)
+        item = Transcript.assistant_item(id, partial, socket.assigns.current_at, true)
         {:noreply, stream_insert(socket, :messages, item)}
 
       _other ->
